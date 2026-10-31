@@ -95,7 +95,8 @@ Both tabs share the chart controls and behaviour:
   folded into "Other"; a station keeps its colour while it stays in the top 7). Click a legend entry to hide a series.
   Below the charts: volume, average, 95th percentile and peak for the shown period, and a per-series table.
 - **Channel load** (the radio boxes on Live; its own section on History): airtime busy per link, split into this AP's TX, its RX and everything else (neighbours, noise).
-  The y axis scales to the busiest bar, so read the labels.
+  The y axis is the percentage of time the channel was busy and scales to the busiest bar, so read the labels.
+  The legend above each graph says what the colours are; hover it for the definition.
 - Hover (or focus a chart and use the arrow keys) for a tooltip with every series at that time. Dashed vertical lines
   mark channel changes and DFS events. Hatched areas mean no data was recorded (daemon not running, or not yet).
 - Colours follow the light / dark setting of the browser.

@@ -32,7 +32,8 @@ main { padding: 16px; max-width: 1200px; margin: 0 auto; display: grid; gap: 16p
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
-.radio canvas.chart { margin-top: 8px; }
+.radio canvas.chart { margin-top: 2px; }
+.radio .legend { margin: 10px 0 0; }
 .radio .top { display: flex; justify-content: space-between; align-items: baseline; }
 .band { font-weight: 600; }
 .band.b24 { color: var(--b24); } .band.b5 { color: var(--b5); } .band.b6 { color: var(--b6); }
@@ -40,6 +41,9 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: v
 .kv span:nth-child(odd) { color: var(--muted); }
 .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
 .bar > i { display: block; height: 100%; background: var(--accent); }
+.bar.stack { display: flex; margin-top: 4px; } .bar.stack > i { flex: none; }
+.busy { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; font-size: 13px; }
+.busy > span:first-child { color: var(--muted); }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { font-size: 12px; color: var(--muted); font-weight: 500; }
@@ -95,6 +99,8 @@ canvas.chart.sm { height: 110px; }
 .legend button.lg.off { opacity: .45; text-decoration: line-through; }
 .legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
 .legend .lv { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.legend.static { align-items: center; font-size: 12px; }
+.legend.static b { font-weight: 500; margin-right: 6px; }
 .legend.static span { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; padding: 1px 6px; }
 table.mini { width: auto; font-size: 12px; margin-top: 8px; }
 table.mini th, table.mini td { padding: 3px 12px; }
@@ -179,6 +185,14 @@ function spark(canvas, series, color) {
   g.fillText(fmt(hi, 1), 2, 10); g.fillText(fmt(lo, 1), 2, h - 5);
 }
 
+/** "Busy 66 %" with a bar split like the airtime graph below it: TX, RX, other busy. */
+function busyBar(r) {
+  const b = Math.min(100, r.busy_pct || 0), tx = Math.min(r.tx_pct || 0, b), rx = Math.min(r.rx_pct || 0, b - tx), other = Math.max(0, b - tx - rx);
+  return `<div class="busy"><span>Channel busy</span><span><b>${fmt(r.busy_pct, 1, " %")}</b>
+      <span class="muted">(tx ${fmt(r.tx_pct, 1)} / rx ${fmt(r.rx_pct, 1)})</span></span></div>
+    <div class="bar stack" role="img" aria-label="Channel busy ${fmt(r.busy_pct, 1, " %")}" title="Share of the time the channel was busy in the last sample: TX, RX and other busy">
+      <i style="width:${tx}%;background:var(--s1)"></i><i style="width:${rx}%;background:var(--s3)"></i><i style="width:${other}%;background:var(--other)"></i></div>`;
+}
 const radioCards = [];   // {text, panel} per radio box, in state order
 let radioSig = "";
 function renderRadios(st) {
@@ -190,7 +204,8 @@ function renderRadios(st) {
       card.className = "card radio"; card.append(text);
       let panel = null;
       if (r.history_key) {
-        const cv = utilCanvas(r); card.append(cv);
+        const cv = utilCanvas(r), lg = document.createElement("div");
+        lg.innerHTML = utilLegend("Airtime busy (%)"); card.append(lg.firstElementChild, cv);
         panel = utilPanel(cv, r.history_key.replace(/:busy$/, ""), () => [600, null]);
       }
       host.append(card); radioCards.push({text, panel});
@@ -206,10 +221,9 @@ function renderRadios(st) {
       <div class="kv">
         <span>TX power</span><span>${fmt(r.txpower, 1, " dBm")}</span>
         <span>Noise</span><span>${fmt(r.noise, 0, " dBm")}</span>
-        <span>Busy</span><span>${fmt(r.busy_pct, 1, " %")} <span class="muted">(tx ${fmt(r.tx_pct, 1)} / rx ${fmt(r.rx_pct, 1)})</span></span>
         <span>Stations</span><span>${r.stations}${r.stations_unlinked ? ` <span class="muted">(+${r.stations_unlinked} link unknown)</span>` : ""}</span>
       </div>
-      <div class="bar"><i style="width:${Math.min(100, r.busy_pct || 0)}%"></i></div>`;
+      ${busyBar(r)}`;
     radioCards[i].panel?.update();
   });
 }
@@ -499,6 +513,10 @@ function utilPanel(cv, key, rng) {
   }, () => { if (o.hover < 0) return; o.hover = -1; hideTip(); o.update(); });
   return o;
 }
+const utilLegend = (caption) => `<div class="legend static muted" title="Share of the time the channel was busy during each interval (from the kernel's survey counters): TX = this radio transmitting, RX = this radio receiving, other busy = busy time that is neither (neighbouring networks, interference).">
+  <b>${caption}</b>
+  <span><i class="sw" style="background:var(--s1)"></i>TX</span><span><i class="sw" style="background:var(--s3)"></i>RX</span>
+  <span><i class="sw" style="background:var(--other)"></i>other busy</span></div>`;
 function utilCanvas(r) {
   const cv = document.createElement("canvas");
   cv.className = "chart sm"; cv.tabIndex = 0; cv.setAttribute("role", "img");
@@ -531,7 +549,7 @@ function ChartView(host, id, ranges, defRange, opts = {}) {
       <details style="margin-top:8px"><summary class="muted">Table view (per series)</summary><div class="scroll" data-r="table"></div></details>
     </section>
     ${opts.util === false ? "" : `<section class="card"><h2>Channel load <span class="muted" style="text-transform:none">(airtime busy per link; y axis scales to the busiest bar)</span></h2>
-      <div class="legend static muted"><span><i class="sw" style="background:var(--s1)"></i>TX</span><span><i class="sw" style="background:var(--s3)"></i>RX</span><span><i class="sw" style="background:var(--other)"></i>other (neighbours, noise)</span></div>
+      ${utilLegend("Y axis: airtime busy, % of time")}
       <div class="grid" data-r="util"></div></section>`}`;
   const R = n => host.querySelector(`[data-r="${n}"]`);
   const range = () => ranges[ui.range], tier = () => range()[2];
