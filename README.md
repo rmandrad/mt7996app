@@ -36,6 +36,36 @@ Written in Rust (`serde`, `regex`, `tiny_http`, `libc`); the web UI is a single 
 > panels. **Not yet verified on hardware**: the nl80211 per-link reader for a real MLO client, the planner, and every
 > control action (they are unit-tested and exercised in `--demo` mode). See [Known limitations](#known-limitations).
 
+## Screenshots
+
+All screenshots were taken in `--demo` mode (synthetic data, see [Try it without hardware](#try-it-without-hardware)),
+with a pre-filled history for the History tab. The stations, MAC addresses and traffic are synthetic.
+
+**Live** - radio boxes with their airtime history, the traffic charts, stations and the advice panels. The dashboard
+follows the browser's light / dark setting.
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-live.png" alt="Live tab, light theme: radios, traffic charts, stations" width="49%">
+  <img src="docs/screenshots/dashboard-live-dark.png" alt="Live tab, dark theme" width="49%">
+</p>
+
+**MLO clients** expand into one card per link (signal, rate, retries and a history graph each), next to the
+aggregate throughput, signal and SNR of the client:
+
+![A MLO station expanded into its 2.4 / 5 / 6 GHz links](docs/screenshots/stations-mlo.png)
+
+**Hover** any chart for the value of every series at that time:
+
+![Traffic chart with a hover tooltip showing the per-band download and upload rates](docs/screenshots/traffic-tooltip.png)
+
+**History** - the same charts over 6 h to 1 year, here by station:
+
+![History tab: 24 h of traffic by station and channel load per link](docs/screenshots/dashboard-history.png)
+
+**Channel planner** - per-subchannel neighbour occupancy, a channel recommendation and puncturing patterns:
+
+![Channel planner with a puncturing recommendation on 5 and 6 GHz](docs/screenshots/advice-planner.png)
+
 ## How it works
 
 Every `--interval` seconds (default 2 s) the collector reads:
