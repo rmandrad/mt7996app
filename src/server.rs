@@ -3,7 +3,7 @@
 //!
 //!   GET  /               dashboard
 //!   GET  /api/state      latest sample (radios, stations, hw, plan, advice)
-//!   GET  /api/history    time series
+//!   GET  /api/history    time series; `?tier=1m|10m|1h` the long tiers (24 h / 30 d / 1 y of averages)
 //!   GET  /api/events     event log, `?since=ID` for incremental reads
 //!   POST /api/control    JSON action, header `X-Token: <token>`
 use crate::collector::Collector;
@@ -96,7 +96,13 @@ pub fn serve(col: Arc<Collector>, log: Arc<crate::events::EventLog>, bind: &str,
                     let body = col.state_json().as_bytes().to_vec();
                     respond(req, 200, body, "application/json")
                 }
-                (tiny_http::Method::Get, "/api/history") => respond(req, 200, col.history_json().into_bytes(), "application/json"),
+                (tiny_http::Method::Get, "/api/history") => {
+                    let tier = url.split_once('?').and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("tier=")));
+                    match col.history_json(tier) {
+                        Some(body) => respond(req, 200, body.into_bytes(), "application/json"),
+                        None => respond(req, 400, b"unknown tier (use 1m, 10m or 1h)\n".to_vec(), "text/plain"),
+                    }
+                }
                 (tiny_http::Method::Get, "/api/events") => {
                     respond(req, 200, log.json(query_u64(&url, "since")).into_bytes(), "application/json")
                 }

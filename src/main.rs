@@ -39,6 +39,10 @@ USAGE: mt7996app [OPTIONS]
   --json            with --once: print JSON instead
   --no-netlink      do not read per-link statistics from nl80211 (iw only)
   --no-kmsg         do not follow /dev/kmsg for DFS/firmware events
+  --history-file P  keep the traffic history (24 h at 1 min, 30 d at 10 min, 1 year at 1 h) in this
+                    JSON file: loaded at start, saved periodically and on SIGTERM/SIGINT.
+                    Off by default; a restart then starts with an empty history
+  --history-save SECS  how often to save it (default 900; use a tmpfs or disk, not a small flash)
   --hostapd-cli P   hostapd_cli binary (default: hostapd_cli); used for DFS state
   --hostapd-ctrl D  hostapd control socket directory (hostapd_cli -p D)
 
@@ -69,6 +73,8 @@ struct Args {
     json: bool,
     netlink: bool,
     kmsg: bool,
+    history_file: Option<String>,
+    history_save: f64,
     hostapd_cli: String,
     hostapd_ctrl: Option<String>,
     allow_control: bool,
@@ -107,6 +113,8 @@ fn parse_args() -> Result<Args, String> {
         json: false,
         netlink: true,
         kmsg: true,
+        history_file: None,
+        history_save: 900.0,
         hostapd_cli: "hostapd_cli".into(),
         hostapd_ctrl: None,
         allow_control: false,
@@ -140,6 +148,13 @@ fn parse_args() -> Result<Args, String> {
             }
             "--iw" => a.iw = val("--iw")?,
             "--debugfs" => a.debugfs = val("--debugfs")?,
+            "--history-file" => a.history_file = Some(val("--history-file")?),
+            "--history-save" => {
+                a.history_save = val("--history-save")?.parse().map_err(|_| "bad --history-save")?;
+                if !(a.history_save >= 10.0) {
+                    return Err("--history-save must be >= 10".into());
+                }
+            }
             "--demo" => a.demo = true,
             "--any-driver" => a.any_driver = true,
             "--no-netlink" => a.netlink = false,
@@ -249,6 +264,64 @@ mod tests {
     }
 }
 
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Atomically replace `path` with the current snapshot (temp file in the same directory + rename).
+fn save_history(col: &Collector, path: &str) -> std::io::Result<()> {
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, col.snapshot())?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Load the history file (if any), then save it every `every` seconds and on SIGTERM / SIGINT.
+fn history_persist(col: &std::sync::Arc<Collector>, log: &std::sync::Arc<EventLog>, path: &str, every: f64) {
+    match std::fs::read_to_string(path) {
+        Ok(j) => match col.restore(&j) {
+            Ok(n) => log.push("info", "system", format!("history restored from {path} ({n} series)")),
+            Err(e) => log.push("warn", "system", format!("{path}: {e}; starting with an empty history")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log.push("warn", "system", format!("cannot read {path}: {e}")),
+    }
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    }
+    let (col, log, path) = (col.clone(), log.clone(), path.to_string());
+    std::thread::Builder::new()
+        .name("history-saver".into())
+        .spawn(move || {
+            let mut last = std::time::Instant::now();
+            let mut failing = false;
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let stop = STOP.load(std::sync::atomic::Ordering::SeqCst);
+                if !stop && last.elapsed().as_secs_f64() < every {
+                    continue;
+                }
+                last = std::time::Instant::now();
+                match save_history(&col, &path) {
+                    Ok(()) => failing = false,
+                    Err(e) => {
+                        eprintln!("mt7996app: cannot save history to {path}: {e}");
+                        if !failing {
+                            log.push("warn", "system", format!("cannot save history to {path}: {e}"));
+                        }
+                        failing = true;
+                    }
+                }
+                if stop {
+                    std::process::exit(0);
+                }
+            }
+        })
+        .expect("spawn history saver");
+}
+
 fn main() {
     let a = match parse_args() {
         Ok(a) => a,
@@ -305,6 +378,9 @@ fn main() {
         return;
     }
 
+    if let Some(path) = &a.history_file {
+        history_persist(&col, &log, path, a.history_save);
+    }
     col.start();
     if let Err(e) = server::serve(col, log, &a.bind, a.port, a.demo) {
         eprintln!("mt7996app: {e}");

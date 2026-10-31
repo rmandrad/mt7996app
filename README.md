@@ -9,6 +9,10 @@ It shows what MLO (multi-link operation) is actually doing and helps you tune th
 - **Stations** - signal, **SNR**, throughput, retry ratio and rates; MLO clients expand into a per-link breakdown with
   history graphs. Per-link numbers come straight from nl80211 (the kernel's `NL80211_ATTR_MLO_LINKS`), because `iw`
   prints an MLO client as one aggregated record.
+- **Traffic history** - client throughput per band or per station as stacked bars (download up, upload below),
+  with a hover tooltip, legend, and totals / average / 95th percentile / peak for the shown period, plus airtime
+  busy (tx / rx / other) per link. The **Live** tab shows the last 10 min / 1 h; the **History** tab shows
+  6 h to 1 year. Optionally persisted to disk, see [Traffic history](#traffic-history).
 - **Hardware counters** (mt76 debugfs) - TX attempts / success / PER, BA misses, A-MSDU histogram, xmit queues, TWT flows, DFS background-radar state.
 - **Event log** - channel changes, stations and MLO links joining/leaving, hostapd DFS/CAC state changes, and DFS /
   radar / firmware / mt76 lines from the kernel log.
@@ -50,7 +54,9 @@ Every `--interval` seconds (default 2 s) the collector reads:
 | `/sys/kernel/debug/ieee80211/phyN/netdev:IF/stations/MAC/link-N/` | per-link addresses of MLO stations |
 
 Throughput, retry ratio and busy % are computed as deltas between samples (counter resets on re-association are
-detected and skipped). The last 300 samples of each series are kept in memory and served to the UI.
+detected and skipped). The last 300 samples of each series are kept in memory and served to the UI, plus the
+averaged long-term tiers for the traffic charts (see [Traffic history](#traffic-history)). Band totals
+(`agg:<band>:tx|rx`) are summed from the per-link rates of MLO clients and from the station rate of single-link ones.
 
 Only phys bound to the `mt7996e` driver are shown, unless you pass `--any-driver`.
 
@@ -71,6 +77,28 @@ cargo run --release -- --demo
 ```
 
 Demo mode simulates an AP with a 3-link MLD (2.4 / 5 / 6 GHz), an MLO phone, a Wi-Fi 6 laptop and a 2.4 GHz IoT device.
+The charts start empty and fill as the daemon runs; add `--history-file /tmp/demo-history.json` to see the history
+survive a restart.
+
+## The dashboard
+
+Two tabs (the choice is kept in the URL: `#live` / `#history`):
+
+- **Live** - radios / links, the 10 min and 1 h traffic charts, stations (click a row for per-link graphs), channel
+  planner, airtime fairness, band steering, event log and the hardware panels. Updates every `--interval`.
+- **History** - the same traffic and channel-load charts over **6 h, 24 h, 7 days, 30 days or 1 year**.
+
+Both tabs share the chart controls and behaviour:
+
+- **Traffic**: client throughput as stacked bars, *download* (AP to clients) on top and *upload* below, each with its
+  own scale. Group **by band** (2.4 / 5 / 6 GHz) or **by station** (the 7 busiest stations in the period, the rest
+  folded into "Other"; a station keeps its colour while it stays in the top 7). Click a legend entry to hide a series.
+  Below the charts: volume, average, 95th percentile and peak for the shown period, and a per-series table.
+- **Channel load**: airtime busy per link, split into this AP's TX, its RX and everything else (neighbours, noise).
+  The y axis scales to the busiest bar, so read the labels.
+- Hover (or focus a chart and use the arrow keys) for a tooltip with every series at that time. Dashed vertical lines
+  mark channel changes and DFS events. Hatched areas mean no data was recorded (daemon not running, or not yet).
+- Colours follow the light / dark setting of the browser.
 
 ## Build
 
@@ -142,6 +170,9 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now mt7996app
 ```
 
+To keep the traffic history across restarts and reboots, add `--history-file`; see
+[Saving the history across restarts](#saving-the-history-across-restarts) for the full service setup.
+
 **OpenWrt** (procd):
 
 ```sh
@@ -156,6 +187,89 @@ start_service() {
     procd_close_instance
 }
 ```
+
+### Traffic history
+
+Throughput (per band and per station) and channel load are averaged into three tiers, kept in memory:
+
+| Tier | Resolution | Kept for | Used for |
+|---|---|---|---|
+| raw | poll interval | 10 min | Live tab, 10 min |
+| `1m` | 1 min | 24 h | Live 1 h, History 6 h / 24 h |
+| `10m` | 10 min | 30 days | History 7 / 30 days |
+| `1h` | 1 h | 1 year | History 1 year |
+
+By default the history is lost when the daemon restarts. Pass `--history-file` to keep it:
+
+```sh
+mt7996app --history-file /var/lib/mt7996app/history.json          # saved every 15 min
+mt7996app --history-file /mnt/disk/history.json --history-save 300
+```
+
+#### Saving the history across restarts
+
+**systemd** (Debian / Armbian / Arch ARM). Same unit as above with two extra lines: the flag, and `StateDirectory=`
+so systemd creates `/var/lib/mt7996app` for you.
+
+```ini
+# /etc/systemd/system/mt7996app.service
+[Unit]
+Description=mt7996 live dashboard
+After=network.target hostapd.service
+
+[Service]
+ExecStart=/usr/local/bin/mt7996app --bind 127.0.0.1 --port 8996 --history-file /var/lib/mt7996app/history.json
+StateDirectory=mt7996app
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload
+systemctl restart mt7996app            # SIGTERM: the daemon writes the file before it exits
+ls -l /var/lib/mt7996app/history.json  # exists after the first save (15 min, or at the first stop)
+```
+
+To save more often, append `--history-save 300` (seconds) to `ExecStart`. `systemctl stop` and `restart` send
+`SIGTERM`, which triggers a final save, so planned restarts lose nothing.
+
+**OpenWrt** (procd). `/tmp` and `/var` are RAM there, so the file would vanish at reboot; use a USB stick or other
+persistent mount (`/mnt/usb` below), and avoid flash-backed overlay paths with frequent saves:
+
+```sh
+#!/bin/sh /etc/rc.common
+# /etc/init.d/mt7996app  (chmod +x, then: /etc/init.d/mt7996app enable && start)
+START=95
+USE_PROCD=1
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/local/bin/mt7996app --bind 127.0.0.1 --port 8996 \
+        --history-file /mnt/usb/mt7996app-history.json --history-save 900
+    procd_set_param respawn
+    procd_close_instance
+}
+```
+
+procd stops the service with `SIGTERM` as well, so `/etc/init.d/mt7996app restart` also saves first.
+
+**Check that it works**: after a restart, the History tab should still show the time before it, with only the
+restart itself as a gap. The event log (Live tab) has a line `history restored from <file> (N series)`; the very first start has no file yet, so the line appears from the second start on. If it says
+`cannot read` / `cannot save` instead, check the path's permissions and that its directory exists (`StateDirectory=`
+and `mkdir -p` create it, `--history-file` does not).
+
+The file is loaded at start, rewritten atomically (temp file + rename) every `--history-save` seconds and once more on
+`SIGTERM` / `SIGINT`, so a normal stop or `systemctl restart` loses nothing. It is one JSON document with a dense array
+per series (a gap is a run of `null`), around 1-2 MB when full. That is rewritten as a whole each time, so on a router
+with small flash point it at tmpfs-backed or external storage and use a longer interval. Downtime shows up as an
+empty stretch in the charts. Series of stations that left stay in the history until they age out of a tier.
+
+A missing file is fine (the first run creates it); an unreadable or incompatible one is reported in the event log and
+ignored, and the next save replaces it. Save failures (read-only path, disk full) are logged once and retried.
+`kill -9` or a power cut loses at most `--history-save` seconds. The 10 minute raw buffer behind the Live tab's
+10 min chart is never saved.
 
 ### Choosing the listen address and port
 
@@ -204,6 +318,8 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 --no-netlink      do not read per-link statistics from nl80211 (iw only)
 --no-kmsg         do not follow /dev/kmsg
 --hostapd-cli P   hostapd_cli binary; --hostapd-ctrl DIR passes -p DIR (control socket directory)
+--history-file P  persist the traffic history in this JSON file (off by default)
+--history-save S  save interval in seconds (default 900, minimum 10)
 
 --allow-control          enable POST /api/control and the auto modes (see below)
 --control-token-file F   file with the shared token (>= 8 chars), or env MT7996APP_TOKEN
@@ -219,6 +335,7 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 | `GET /` | the dashboard |
 | `GET /api/state` | latest sample: `radios`, `stations` (with `links`), `hw`, `plan`, `airtime`, `steering`, `control`, `errors` |
 | `GET /api/history` | time series `{ key: [[ts, value], ...] }`, e.g. `sta:<mac>:l2:tx`, `sta:<mac>:snr`, `chan:wlan0:5180:busy` |
+| `GET /api/history?tier=1m\|10m\|1h` | long-term averages (24 h / 30 d / 1 y) of `agg:<band>:tx\|rx`, `sta:<mac>:tx\|rx`, `chan:<if>:<freq>:busy\|tx\|rx` |
 | `GET /api/events?since=ID` | event log, oldest first; pass the last seen `id` to read incrementally |
 | `POST /api/control` | JSON action with header `X-Token`; only with `--allow-control` |
 
@@ -284,11 +401,21 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
   neighbour report's PHY type values for HE/EHT are unverified. Treat it as a suggestion.
 - Airtime control is a single conservative step (weight scaled by fair share / actual share), not a feedback loop.
 - The kernel log is only followed when the daemon runs as root.
+- **History is averaged and approximate.** A bar is the mean rate of its time slot (up to 1 h in the 1 year view), so
+  bursts disappear, and volumes are rate x time, not byte counters. Traffic that is not on a station (broadcast,
+  monitor interfaces) is not counted.
+- **History is per MAC address.** Clients with randomised / rotating MACs show up as separate stations. Series of
+  departed stations are kept until they age out and are not capped, so a busy public AP grows its history file.
+- A band shown as "MLO (link unknown)" is traffic of an MLO client whose per-link rates were not available (see the
+  nl80211 note above); it cannot be attributed to a band.
+- Chart time axes use the browser's time zone and the router's clock. A router with a wrong clock (no NTP) shows
+  shifted or overlapping history.
 
 ## Roadmap
 
 - Verify and tune the control actions on hardware (hostapd `-l LINK`, BTM neighbour reports).
 - Neighbour width from scan IEs for a more accurate planner; 802.11k beacon requests for steering decisions.
+- History: cap the number of stored series, and a CSV / JSON export of the shown period.
 - Throughput test harness (iperf3 matrix across bandwidth / MLO mode) for regression-testing mt76 changes.
 
 ## License

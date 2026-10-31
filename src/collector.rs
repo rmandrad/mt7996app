@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HISTORY_LEN: usize = 300; // samples per series
+/// Long-term tiers: (name, seconds per point, points kept). 1 min for 24 h, 10 min for 30 d, 1 h for a year.
+pub const TIERS: [(&str, f64, usize); 3] = [("1m", 60.0, 24 * 60), ("10m", 600.0, 30 * 24 * 6), ("1h", 3600.0, 365 * 24)];
+const SNAPSHOT_VERSION: u32 = 1;
 const STALE_SECS: f64 = 600.0; // drop series/counters that stopped updating
 const PLAN_EVERY_SECS: f64 = 10.0;
 
@@ -69,10 +72,29 @@ struct View {
     started: bool,
 }
 
+/// Running average of the bucket currently being sampled for one long-tier series.
+#[derive(Default, Clone, Copy)]
+struct Bucket {
+    idx: i64,
+    sum: f64,
+    n: u32,
+}
+
+type Series = BTreeMap<String, VecDeque<(f64, f64)>>;
+
+/// One `Series` map and one set of open buckets per entry of `TIERS`.
+#[derive(Default)]
+struct Tiers {
+    series: [Series; 3],
+    open: [HashMap<String, Bucket>; 3],
+}
+
 #[derive(Default)]
 struct Inner {
     state_json: Arc<String>,
     history: BTreeMap<String, VecDeque<(f64, f64)>>,
+    /// Averages of the series the traffic charts need, per tier; outlives the stations.
+    long: Tiers,
     last_seen: HashMap<String, f64>,
     prev: HashMap<String, (f64, Ctr)>,
     prev_survey: HashMap<String, SurveyChan>,
@@ -133,8 +155,64 @@ impl Collector {
         lock(&self.inner).state_json.clone()
     }
 
-    pub fn history_json(&self) -> String {
-        serde_json::to_string(&lock(&self.inner).history).unwrap_or_else(|_| "{}".into())
+    /// `tier`: a name from `TIERS` (averages of throughput and channel load only), or `None` for the raw samples.
+    pub fn history_json(&self, tier: Option<&str>) -> Option<String> {
+        let inner = lock(&self.inner);
+        let r = match tier {
+            None => serde_json::to_string(&inner.history),
+            Some(t) => serde_json::to_string(&inner.long.series[TIERS.iter().position(|x| x.0 == t)?]),
+        };
+        Some(r.unwrap_or_else(|_| "{}".into()))
+    }
+
+    /// Everything in the long tiers (closed points and the open buckets) as a JSON document.
+    pub fn snapshot(&self) -> String {
+        let inner = lock(&self.inner);
+        let tiers = TIERS.iter().enumerate().map(|(n, &(name, secs, _))| {
+            let series = inner.long.series[n].iter().map(|(k, pts)| {
+                let idx = |t: f64| (t / secs).floor() as i64;
+                let start = pts.front().map_or(0, |p| idx(p.0));
+                let mut v: Vec<Option<f64>> = vec![];
+                for &(t, x) in pts {
+                    v.resize((idx(t) - start) as usize, None); // an outage is a run of nulls
+                    v.push(Some(x));
+                }
+                (k.clone(), snap::Dense { start, v })
+            });
+            let open = inner.long.open[n].iter().filter(|(_, b)| b.n > 0).map(|(k, b)| (k.clone(), (b.idx, round(b.sum, 3), b.n)));
+            snap::Tier { name: name.into(), secs, series: series.collect(), open: open.collect() }
+        });
+        let f = snap::File { version: SNAPSHOT_VERSION, saved: now_ts(), tiers: tiers.collect() };
+        serde_json::to_string(&f).unwrap_or_default()
+    }
+
+    /// Load a `snapshot()`; returns the number of series restored. Call before the first poll.
+    pub fn restore(&self, json: &str) -> Result<usize, String> {
+        let f: snap::File = serde_json::from_str(json).map_err(|e| format!("bad history file: {e}"))?;
+        if f.version != SNAPSHOT_VERSION {
+            return Err(format!("history file version {} not supported", f.version));
+        }
+        let now = now_ts();
+        let mut inner = lock(&self.inner);
+        let mut n_series = 0;
+        for t in f.tiers {
+            let Some(n) = TIERS.iter().position(|x| x.0 == t.name && x.1 == t.secs) else { continue };
+            let (_, secs, len) = TIERS[n];
+            for (k, d) in t.series {
+                let pts: VecDeque<(f64, f64)> = d.v.iter().enumerate()
+                    .filter_map(|(i, x)| x.map(|x| (round(((d.start + i as i64) as f64 + 0.5) * secs, 1), x)))
+                    .filter(|p| now - p.0 <= secs * len as f64)
+                    .collect();
+                if !pts.is_empty() {
+                    n_series += 1;
+                    inner.long.series[n].insert(k, pts);
+                }
+            }
+            for (k, (idx, sum, cnt)) in t.open {
+                inner.long.open[n].insert(k, Bucket { idx, sum, n: cnt });
+            }
+        }
+        Ok(n_series)
     }
 
     pub fn start(self: &Arc<Self>) -> std::thread::JoinHandle<()> {
@@ -199,8 +277,8 @@ impl Collector {
             inner.prev.insert(key, (now, Ctr::of(&s.stats)));
 
             let sid = format!("sta:{}", s.mac);
-            push(inner, format!("{sid}:tx"), now, s.stats.mbps_tx);
-            push(inner, format!("{sid}:rx"), now, s.stats.mbps_rx);
+            push_long(inner, format!("{sid}:tx"), now, s.stats.mbps_tx);
+            push_long(inner, format!("{sid}:rx"), now, s.stats.mbps_rx);
             push(inner, format!("{sid}:sig"), now, s.stats.signal.map(f64::from));
 
             for l in &mut s.links {
@@ -219,6 +297,7 @@ impl Collector {
         }
 
         let mut radios = radios(inner, &ifaces, &survey, now);
+        aggregate(inner, &radios, &sta_list, now);
 
         // SNR = signal - noise floor of the link the signal was measured on
         let noise_of = |iface: &str, link: Option<u32>| radios.iter().find(|r| r.iface == iface && r.link == link).and_then(|r| r.noise);
@@ -407,6 +486,72 @@ fn push(inner: &mut Inner, key: String, ts: f64, val: Option<f64>) {
     inner.last_seen.insert(key, ts);
 }
 
+/// Close a bucket into its tier's series.
+fn close_bucket(series: &mut Series, key: &str, b: &Bucket, tier: usize) {
+    if b.n == 0 {
+        return;
+    }
+    let (_, secs, len) = TIERS[tier];
+    let h = series.entry(key.to_string()).or_default();
+    if h.len() >= len {
+        h.pop_front();
+    }
+    h.push_back((round((b.idx as f64 + 0.5) * secs, 1), round(b.sum / b.n as f64, 2)));
+}
+
+/// Like `push`, but also feeds the long tiers (each point is the mean of its time slot).
+fn push_long(inner: &mut Inner, key: String, ts: f64, val: Option<f64>) {
+    let Some(v) = val else { return };
+    push(inner, key.clone(), ts, val);
+    let Tiers { series, open } = &mut inner.long;
+    for (n, &(_, secs, _)) in TIERS.iter().enumerate() {
+        let idx = (ts / secs).floor() as i64;
+        let b = open[n].entry(key.clone()).or_insert(Bucket { idx, ..Default::default() });
+        if b.idx != idx {
+            close_bucket(&mut series[n], &key, b, n);
+            *b = Bucket { idx, ..Default::default() };
+        }
+        b.sum += v;
+        b.n += 1;
+    }
+}
+
+/// Total client throughput per band (`agg:<band>:tx|rx`, tx = AP to clients) from the per-link
+/// rates of MLO stations and the station rate of single-link ones. A station whose links carry
+/// no rate of their own lands under `MLD` (or `?` for a link of unknown band).
+fn aggregate(inner: &mut Inner, radios: &[Radio], stas: &[Station], now: f64) {
+    let mut sum: BTreeMap<&'static str, [f64; 2]> = radios.iter().filter_map(|r| r.band).map(|b| (b, [0.0, 0.0])).collect();
+    let mut known = stas.is_empty(); // nothing associated is a real zero, a first sample is not
+    for s in stas {
+        let per_link = s.links.iter().any(|l| l.stats.mbps_tx.is_some() || l.stats.mbps_rx.is_some());
+        if per_link {
+            known = true;
+            for l in &s.links {
+                let e = sum.entry(l.band.unwrap_or("?")).or_default();
+                e[0] += l.stats.mbps_tx.unwrap_or(0.0);
+                e[1] += l.stats.mbps_rx.unwrap_or(0.0);
+            }
+        } else if s.stats.mbps_tx.is_some() || s.stats.mbps_rx.is_some() {
+            known = true;
+            let bands: BTreeSet<&'static str> = radios.iter().filter(|r| r.iface == s.iface).filter_map(|r| r.band).collect();
+            let b = match (s.links.is_empty(), bands.len()) {
+                (true, 1) => *bands.iter().next().unwrap(),
+                _ => "MLD",
+            };
+            let e = sum.entry(b).or_default();
+            e[0] += s.stats.mbps_tx.unwrap_or(0.0);
+            e[1] += s.stats.mbps_rx.unwrap_or(0.0);
+        }
+    }
+    if !known {
+        return;
+    }
+    for (b, [tx, rx]) in sum {
+        push_long(inner, format!("agg:{b}:tx"), now, Some(round(tx, 2)));
+        push_long(inner, format!("agg:{b}:rx"), now, Some(round(rx, 2)));
+    }
+}
+
 fn radios(inner: &mut Inner, ifaces: &[Iface], survey: &HashMap<String, Vec<SurveyChan>>, now: f64) -> Vec<Radio> {
     let mut out = vec![];
     for i in ifaces {
@@ -449,7 +594,9 @@ fn radios(inner: &mut Inner, ifaces: &[Iface], survey: &HashMap<String, Vec<Surv
                 }
                 inner.prev_survey.insert(pkey, c.clone());
                 let hk = format!("chan:{}:{}:busy", i.name, c.freq);
-                push(inner, hk.clone(), now, r.busy_pct);
+                push_long(inner, hk.clone(), now, r.busy_pct);
+                push_long(inner, format!("chan:{}:{}:tx", i.name, c.freq), now, r.tx_pct);
+                push_long(inner, format!("chan:{}:{}:rx", i.name, c.freq), now, r.rx_pct);
                 r.history_key = Some(hk);
             }
             out.push(r);
@@ -463,8 +610,48 @@ fn gc(inner: &mut Inner, now: f64) {
     for k in stale {
         inner.history.remove(&k);
         inner.last_seen.remove(&k);
+        // the station left: keep what it carried, closing its partial buckets
+        let Tiers { series, open } = &mut inner.long;
+        for n in 0..TIERS.len() {
+            if let Some(b) = open[n].remove(&k) {
+                close_bucket(&mut series[n], &k, &b, n);
+            }
+        }
     }
     inner.prev.retain(|_, (t, _)| now - *t <= STALE_SECS);
+    // a series goes once nothing is left inside its tier's window
+    for (n, &(_, secs, len)) in TIERS.iter().enumerate() {
+        inner.long.series[n].retain(|_, h| h.back().is_some_and(|(t, _)| now - t <= secs * len as f64));
+    }
+}
+
+/// On-disk format of the long tiers. Points are dense per series (start slot + values, `null`
+/// for a gap) because the slots are fixed, which keeps a year of data small.
+mod snap {
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize, Deserialize)]
+    pub struct Dense {
+        pub start: i64,
+        pub v: Vec<Option<f64>>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct Tier {
+        pub name: String,
+        pub secs: f64,
+        pub series: BTreeMap<String, Dense>,
+        /// slot, sum, count of the bucket still being filled
+        pub open: BTreeMap<String, (i64, f64, u32)>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct File {
+        pub version: u32,
+        pub saved: f64,
+        pub tiers: Vec<Tier>,
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +717,76 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&s2).unwrap()).unwrap();
         let msgs: Vec<String> = log.all().into_iter().map(|e| e.msg).collect();
         assert!(msgs.iter().any(|m| m.starts_with("monitoring started")));
+    }
+
+    #[test]
+    fn long_tiers_average_per_slot() {
+        let mut inner = Inner::default();
+        for (t, v) in [(60.0, 10.0), (90.0, 20.0), (119.0, 30.0), (120.0, 99.0)] {
+            push_long(&mut inner, "k".into(), t, Some(v));
+        }
+        // minute 1 (60..120) is closed with its average, minute 2 is still open
+        assert_eq!(inner.long.series[0]["k"], VecDeque::from([(90.0, 20.0)]));
+        assert!(!inner.long.series[1].contains_key("k")); // the 10 min slot is still open
+        assert_eq!(inner.history["k"].len(), 4);
+        // a quiet series keeps its long tiers (and its open buckets are closed), then expires per tier
+        gc(&mut inner, 120.0 + STALE_SECS + 1.0);
+        assert!(!inner.history.contains_key("k"));
+        assert_eq!(inner.long.series[1]["k"], VecDeque::from([(300.0, (10.0 + 20.0 + 30.0 + 99.0) / 4.0)]));
+        gc(&mut inner, 150.0 + 86400.0 + 1.0);
+        assert!(inner.long.series[0].is_empty() && !inner.long.series[1].is_empty());
+        gc(&mut inner, 1800.0 + 365.0 * 86400.0 + 1.0);
+        assert!(inner.long.series.iter().all(|s| s.is_empty()));
+    }
+
+    #[test]
+    fn snapshot_roundtrip_keeps_gaps_and_open_buckets() {
+        let (c, _) = collector(Default::default());
+        let now = now_ts();
+        {
+            let mut inner = lock(&c.inner);
+            // 5 min of samples, a 20 min outage, then more
+            for i in 0..150 {
+                push_long(&mut inner, "agg:5G:tx".into(), now - 3600.0 + i as f64 * 2.0, Some(10.0));
+            }
+            for i in 0..30 {
+                push_long(&mut inner, "agg:5G:tx".into(), now - 600.0 + i as f64 * 2.0, Some(30.0));
+            }
+        }
+        let json = c.snapshot();
+        let (d, _) = collector(Default::default());
+        assert!(d.restore(&json).unwrap() >= 1);
+        let (a, b) = (lock(&c.inner), lock(&d.inner));
+        for n in 0..3 {
+            assert_eq!(a.long.series[n], b.long.series[n], "tier {n}");
+            assert_eq!(a.long.open[n].len(), b.long.open[n].len());
+        }
+        assert!(a.long.series[0]["agg:5G:tx"].len() >= 4);
+        // the open bucket carries on after a restart: the next sample extends it
+        drop(b);
+        push_long(&mut lock(&d.inner), "agg:5G:tx".into(), now, Some(30.0));
+        assert!(d.restore("{").is_err());
+        assert!(d.restore(r#"{"version":99,"saved":0,"tiers":[]}"#).is_err());
+    }
+
+    #[test]
+    fn aggregate_splits_traffic_by_band() {
+        let radio = |iface: &str, link: Option<u32>, band| Radio { iface: iface.into(), link, band: Some(band), ..Default::default() };
+        let radios = [radio("wlan0", Some(0), "2.4G"), radio("wlan0", Some(1), "5G"), radio("wlan1", None, "6G")];
+        let link = |id, band, tx, rx| Link { id, band: Some(band), stats: Stats { mbps_tx: Some(tx), mbps_rx: Some(rx), ..Default::default() }, ..Default::default() };
+        let mlo = Station { mac: "a".into(), iface: "wlan0".into(), mlo: true, links: vec![link(0, "2.4G", 1.0, 0.5), link(1, "5G", 100.0, 10.0)], ..Default::default() };
+        let single = Station { mac: "b".into(), iface: "wlan1".into(), stats: Stats { mbps_tx: Some(50.0), mbps_rx: Some(5.0), ..Default::default() }, ..Default::default() };
+        let mut inner = Inner::default();
+        aggregate(&mut inner, &radios, &[mlo, single], 100.0);
+        let last = |k: &str| inner.history[k].back().unwrap().1;
+        assert_eq!((last("agg:2.4G:tx"), last("agg:5G:tx"), last("agg:6G:tx"), last("agg:6G:rx")), (1.0, 100.0, 50.0, 5.0));
+        // first sample (no rates yet) must not record a fake zero; an empty AP is a real zero
+        let mut inner = Inner::default();
+        let idle = Station { mac: "c".into(), iface: "wlan1".into(), ..Default::default() };
+        aggregate(&mut inner, &radios, &[idle], 100.0);
+        assert!(inner.history.is_empty());
+        aggregate(&mut inner, &radios, &[], 102.0);
+        assert_eq!(inner.history["agg:5G:tx"].back().unwrap().1, 0.0);
     }
 
     #[test]

@@ -9,12 +9,14 @@
   --bg: #f6f7f9; --card: #fff; --fg: #1b1f24; --muted: #6a737d; --line: #e1e4e8;
   --accent: #2f6fed; --ok: #1a7f37; --warn: #b7791f; --bad: #cf222e;
   --b24: #d97706; --b5: #2f6fed; --b6: #8250df;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --other: #9aa3ad;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f1216; --card: #171b21; --fg: #e6e9ee; --muted: #8b949e; --line: #2a303a;
     --accent: #6b9bff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
     --b24: #f0a030; --b5: #6b9bff; --b6: #b392f0;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --other: #6b7480;
   }
 }
 * { box-sizing: border-box; }
@@ -71,6 +73,40 @@ button.warn { border-color: var(--warn); color: var(--warn); } button.warn:hover
 #toast { position: fixed; right: 12px; bottom: 12px; max-width: 420px; padding: 8px 12px; border-radius: 8px;
   background: var(--card); border: 1px solid var(--line); box-shadow: 0 2px 10px #0004; font-size: 12px; white-space: pre-wrap; }
 #toast.bad { border-color: var(--bad); }
+.pane { display: grid; gap: 16px; } .pane[hidden] { display: none; }
+nav.tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+nav.tabs button { border: 0; border-radius: 0; color: var(--fg); padding: 4px 16px; font-size: 13px; }
+nav.tabs button + button { border-left: 1px solid var(--line); }
+nav.tabs button:hover { background: var(--bg); color: var(--fg); }
+nav.tabs button[aria-selected="true"] { background: var(--accent); color: #fff; }
+.bar-row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; color: var(--fg); padding: 4px 12px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { background: var(--bg); color: var(--fg); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+canvas.chart { height: 150px; touch-action: pan-y; outline-offset: 2px; }
+canvas.chart.sm { height: 110px; }
+.pt { font-size: 12px; margin: 10px 0 2px; } .pt:first-of-type { margin-top: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 10px 0 4px; }
+.legend button.lg { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 1px 8px; }
+.legend button.lg:hover { background: var(--bg); color: var(--fg); }
+.legend button.lg.off { opacity: .45; text-decoration: line-through; }
+.legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+.legend .lv { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.legend.static span { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; padding: 1px 6px; }
+table.mini { width: auto; font-size: 12px; margin-top: 8px; }
+table.mini th, table.mini td { padding: 3px 12px; }
+#tip { position: fixed; z-index: 10; pointer-events: none; min-width: 200px; max-width: 360px; padding: 8px 10px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--line); box-shadow: 0 4px 16px #0005; font-size: 12px; }
+#tip .th { color: var(--muted); margin-bottom: 4px; }
+#tip table { width: 100%; } #tip th, #tip td { padding: 1px 0 1px 12px; border: 0; }
+#tip th:first-child, #tip td:first-child { padding-left: 0; text-align: left; white-space: normal; }
+#tip td.n { font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+#tip th { text-align: right; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+#tip .k { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px; }
+#tip tr.tot td { border-top: 1px solid var(--line); padding-top: 3px; }
+#tip .ev { color: var(--warn); margin-top: 4px; max-height: none; overflow: visible; display: block; }
 @media (max-width: 600px) { main { padding: 10px; } }
 </style>
 </head>
@@ -81,19 +117,30 @@ button.warn { border-color: var(--warn); color: var(--warn); } button.warn:hover
   <span id="demo" class="badge demo" hidden>demo data</span>
   <span id="upd" class="muted"></span>
   <span id="ctl" class="ctl" hidden></span>
+  <nav class="tabs" role="tablist" style="margin-left:auto">
+    <button role="tab" data-tab="live">Live</button><button role="tab" data-tab="history">History</button>
+  </nav>
 </header>
 <main>
   <div id="errors"></div>
   <div id="toast" hidden></div>
-  <section><h2>Radios / links</h2><div id="radios" class="grid"></div></section>
-  <section class="card"><h2>Stations</h2><div class="scroll"><table id="stas"></table></div></section>
-  <section class="card"><h2>Channel planner / puncturing <span class="muted" style="text-transform:none">(advice from the scan cache)</span></h2>
-    <div id="plan"></div></section>
-  <section class="card"><h2>Airtime fairness</h2><div class="scroll"><table id="air"></table></div></section>
-  <section class="card"><h2>Band steering (single-link clients)</h2><div class="scroll"><table id="steer"></table></div></section>
-  <section class="card"><h2>Events (DFS, firmware, channel changes, joins, control audit)</h2><div id="events" class="ev"></div></section>
-  <section class="card"><h2>Hardware: TX per band</h2><div id="tx" class="grid"></div></section>
-  <section class="card"><h2>Hardware queues / TWT / DFS</h2><div id="misc"></div></section>
+  <div id="tip" hidden></div>
+  <div id="tab-live" class="pane">
+    <section><h2>Radios / links</h2><div id="radios" class="grid"></div></section>
+    <div id="liveCharts" class="pane"></div>
+    <section class="card"><h2>Stations</h2><div class="scroll"><table id="stas"></table></div></section>
+    <section class="card"><h2>Channel planner / puncturing <span class="muted" style="text-transform:none">(advice from the scan cache)</span></h2>
+      <div id="plan"></div></section>
+    <section class="card"><h2>Airtime fairness</h2><div class="scroll"><table id="air"></table></div></section>
+    <section class="card"><h2>Band steering (single-link clients)</h2><div class="scroll"><table id="steer"></table></div></section>
+    <section class="card"><h2>Events (DFS, firmware, channel changes, joins, control audit)</h2><div id="events" class="ev"></div></section>
+    <section class="card"><h2>Hardware: TX per band</h2><div id="tx" class="grid"></div></section>
+    <section class="card"><h2>Hardware queues / TWT / DFS</h2><div id="misc"></div></section>
+  </div>
+  <div id="tab-history" class="pane" hidden>
+    <div id="histCharts" class="pane"></div>
+    <p class="muted" id="histNote"></p>
+  </div>
 </main>
 <script>
 "use strict";
@@ -221,6 +268,418 @@ function drawSparks() {
 }
 
 
+// ------------------------------------------------------------- charts ----
+// Stacked-bar time series on canvas, shared by the Live and History tabs. A range is served from the
+// raw 2 s samples (tier null) or from one of the daemon's averaged tiers; columns are re-bucketed to ~5 px.
+const TIER = {"1m": {secs: 60, every: 30e3, finer: null}, "10m": {secs: 600, every: 120e3, finer: "1m"}, "1h": {secs: 3600, every: 300e3, finer: "10m"}};
+const tierData = {};                   // name -> {data: {key: [[t, v]]}, at}
+const BAND_ORDER = ["2.4G", "5G", "6G", "MLD", "?"];
+const BAND_VAR = {"2.4G": "--b24", "5G": "--b5", "6G": "--b6"};
+const NSLOT = 7;                       // categorical colors; the rest folds into "Other"
+let srvNow = Date.now() / 1000, pollSec = 2, lastSt = null;
+const cssv = n => getComputedStyle(document.body).getPropertyValue(n).trim();
+const trimZ = t => t.includes(".") ? t.replace(/0+$/, "").replace(/\.$/, "") : t;
+const views = [];
+
+function fmtRate(m) {
+  if (!(m > 0)) return "0";
+  if (m >= 1000) return trimZ((m / 1000).toFixed(2)) + " Gb/s";
+  if (m >= 100) return m.toFixed(0) + " Mb/s";
+  if (m >= 1) return trimZ(m.toFixed(1)) + " Mb/s";
+  return (m * 1000).toFixed(0) + " kb/s";
+}
+function fmtVol(mb) {
+  if (!(mb > 0)) return "0";
+  if (mb >= 1e6) return trimZ((mb / 1e6).toFixed(2)) + " TB";
+  if (mb >= 1e3) return trimZ((mb / 1e3).toFixed(2)) + " GB";
+  if (mb >= 1) return trimZ(mb.toFixed(1)) + " MB";
+  return (mb * 1000).toFixed(0) + " kB";
+}
+const fmtPct = v => trimZ((+v).toFixed(v < 10 ? 1 : 0)) + " %";
+const fmtSpan = sec => sec < 90 ? Math.round(sec) + " s" : sec < 5400 ? Math.round(sec / 60) + " min" : sec < 172800 ? trimZ((sec / 3600).toFixed(1)) + " h" : trimZ((sec / 86400).toFixed(1)) + " days";
+function niceMax(v, floor = 0) {
+  v = Math.max(v, floor);
+  if (!(v > 0) || !isFinite(v)) return 1;
+  const e = 10 ** Math.floor(Math.log10(v)), m = v / e;
+  return (m <= 1 ? 1 : m <= 1.5 ? 1.5 : m <= 2 ? 2 : m <= 3 ? 3 : m <= 4 ? 4 : m <= 5 ? 5 : m <= 6 ? 6 : m <= 8 ? 8 : 10) * e;
+}
+const clock = (t, secs) => new Date(t * 1000).toLocaleTimeString([], secs ? {hour: "2-digit", minute: "2-digit", second: "2-digit"} : {hour: "2-digit", minute: "2-digit"});
+const dayOf = t => new Date(t * 1000).toLocaleDateString([], {month: "short", day: "numeric"});
+const stamp = (t, g) => g.colSec >= 43200 ? dayOf(t) : g.t1 - g.t0 > 43200 ? dayOf(t) + " " + clock(t, false) : clock(t, g.colSec < 60);
+
+async function fetchTier(name, force) {
+  const d = tierData[name] || (tierData[name] = {data: {}, at: 0});
+  if (!force && Date.now() - d.at < TIER[name].every) return;
+  d.at = Date.now();
+  try { d.data = await (await fetch("/api/history?tier=" + name, {cache: "no-store"})).json(); } catch (e) {}
+}
+
+/** Points of one series for a range served from `tier`: that tier, then the next finer one for the newest slots. */
+function points(key, tier) {
+  if (!tier) return hist[key] || [];
+  const own = (tierData[tier]?.data || {})[key] || [], fine = TIER[tier].finer;
+  const last = own.length ? own[own.length - 1][0] + TIER[tier].secs / 2 : -Infinity;
+  return own.concat(points(key, fine).filter(p => p[0] > last));
+}
+
+/** Column grid: n columns of colSec seconds ending at now; tier columns are multiples of the tier slot. */
+function makeGrid(w, now, range, tier) {
+  const maxCols = Math.max(20, Math.floor(w / 5));
+  if (!tier) {
+    const n = Math.max(10, Math.min(maxCols, Math.floor(range / (1.5 * Math.max(pollSec, .2)))));
+    return {n, colSec: range / n, t0: now - range, t1: now};
+  }
+  const slot = TIER[tier].secs, colSec = slot * Math.max(1, Math.ceil(range / slot / maxCols)), n = Math.ceil(range / colSec);
+  const t1 = (Math.floor(now / colSec) + 1) * colSec;
+  return {n, colSec, t0: t1 - n * colSec, t1};
+}
+function bucket(pts, g) {
+  const sum = new Float64Array(g.n), cnt = new Uint16Array(g.n);
+  for (const [t, v] of pts) {
+    const i = Math.floor((t - g.t0) / g.colSec);
+    if (i >= 0 && i < g.n) { sum[i] += v; cnt[i]++; }
+  }
+  return Array.from(sum, (x, i) => cnt[i] ? x / cnt[i] : NaN);
+}
+const addNaN = (a, b) => a.map((x, i) => Number.isNaN(x) ? b[i] : Number.isNaN(b[i]) ? x : x + b[i]);
+const sumOf = a => a.reduce((s, v) => s + (v > 0 ? v : 0), 0);
+
+function xticks(g, w) {
+  const span = g.t1 - g.t0, want = Math.max(2, Math.floor(w / 70));
+  const step = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 1209600, 2592000].find(s => span / s <= want) || 2592000;
+  const off = t => -new Date(t * 1000).getTimezoneOffset() * 60, out = [];   // local time, per tick: DST shifts the offset
+  for (let k = Math.ceil((g.t0 + off(g.t0)) / step); ; k++) {
+    let t = k * step - off(g.t0);
+    t = k * step - off(t);
+    if (t >= g.t1) break;
+    if (t >= g.t0) {
+      const d = new Date(t * 1000), midnight = d.getHours() === 0 && d.getMinutes() === 0;
+      out.push({t, label: step >= 86400 || (midnight && span > 129600) ? dayOf(t) : clock(t, false)});
+    }
+  }
+  return out;
+}
+function hatchPattern(c, color) {
+  const h = document.createElement("canvas"); h.width = h.height = 8;
+  const x = h.getContext("2d"); x.strokeStyle = color; x.globalAlpha = .6; x.lineWidth = 1;
+  x.beginPath(); x.moveTo(0, 8); x.lineTo(8, 0); x.moveTo(-2, 2); x.lineTo(2, -2); x.moveTo(6, 10); x.lineTo(10, 6); x.stroke();
+  return c.createPattern(h, "repeat");
+}
+
+/** o: {cv, g, stacks(i)->[value per series], colors[], max, fmtY, has[], hover, xlabels, events[]}; sets o.lay. */
+function drawPanel(o) {
+  const cv = o.cv, dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W) return;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const c = cv.getContext("2d"); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const ML = 58, MR = 6, MT = 8, MB = o.xlabels ? 20 : 6, pw = W - ML - MR, ph = H - MT - MB, cw = pw / o.g.n;
+  o.lay = {ML, MT, pw, ph, cw};
+  const line = cssv("--line"), muted = cssv("--muted"), card = cssv("--card");
+  c.font = "11px system-ui, sans-serif"; c.lineWidth = 1; c.strokeStyle = line; c.fillStyle = muted;
+  c.textAlign = "right"; c.textBaseline = "middle";
+  for (const f of [0, .5, 1]) {
+    const y = Math.round(MT + ph - f * ph) + .5;
+    c.beginPath(); c.moveTo(ML, y); c.lineTo(W - MR, y); c.stroke();
+    c.fillText(o.fmtY(o.max * f), ML - 6, Math.min(Math.max(y, MT + 6), MT + ph - 4));
+  }
+  const first = o.has.indexOf(true), nd = first < 0 ? o.g.n : first;
+  if (nd > 0) {
+    c.fillStyle = hatchPattern(c, line); c.fillRect(ML, MT, nd * cw, ph);
+    if (first < 0) { c.fillStyle = muted; c.textAlign = "center"; c.fillText("no data yet", ML + pw / 2, MT + ph / 2); }
+  }
+  const cols = o.colors.map(cssv), bw = Math.max(1, cw - (cw >= 4 ? 1 : 0));
+  for (let i = 0; i < o.g.n; i++) {
+    const vals = o.stacks(i), x = ML + i * cw;
+    let y = MT + ph;
+    for (let j = 0; j < vals.length; j++) {
+      if (!(vals[j] > 0)) continue;
+      const h = Math.max(1, Math.min(y - MT, vals[j] / o.max * ph));
+      y -= h; c.fillStyle = cols[j]; c.fillRect(x, y, bw, h);
+      if (h >= 3) { c.fillStyle = card; c.fillRect(x, y, bw, 1); }   // 1 px surface gap between segments
+    }
+  }
+  if (o.hover >= 0) { c.globalAlpha = .12; c.fillStyle = cssv("--fg"); c.fillRect(ML + o.hover * cw, MT, cw, ph); c.globalAlpha = 1; }
+  c.strokeStyle = cssv("--warn"); c.setLineDash([3, 3]);
+  for (const e of o.events || []) {
+    const x = Math.round(ML + (e.t - o.g.t0) / (o.g.t1 - o.g.t0) * pw) + .5;
+    c.beginPath(); c.moveTo(x, MT); c.lineTo(x, MT + ph); c.stroke();
+  }
+  c.setLineDash([]);
+  if (o.xlabels) {
+    c.fillStyle = muted; c.textAlign = "center"; c.textBaseline = "top";
+    for (const tk of xticks(o.g, pw)) {
+      const x = ML + (tk.t - o.g.t0) / (o.g.t1 - o.g.t0) * pw;
+      c.fillText(tk.label, Math.min(Math.max(x, ML + 14), W - MR - 14), MT + ph + 5);
+    }
+  }
+}
+
+const colAt = (o, ev) => {
+  if (!o.lay) return -1;
+  const x = ev.clientX - o.cv.getBoundingClientRect().left - o.lay.ML, i = Math.floor(x / o.lay.cw);
+  return x >= 0 && i < o.g.n ? i : -1;
+};
+const evMarks = g => events.filter(e => (e.kind === "channel" || e.kind === "dfs") && e.ts >= g.t0 && e.ts < g.t1).map(e => ({t: e.ts, msg: e.msg}));
+
+// ---- tooltip (all text goes through textContent: names come from the radio / network)
+const tipEl = $("tip");
+function showTip(head, heads, rows, notes, x, y) {
+  const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+  const t = el("table"), hr = el("tr"); hr.append(el("th"));
+  for (const h of heads) hr.append(el("th", "", h));
+  t.append(hr);
+  for (const r of rows) {
+    const tr = el("tr", r.total ? "tot" : ""), nm = el("td");
+    if (r.color) { const k = el("i", "k"); k.style.background = `var(${r.color})`; nm.append(k); }
+    nm.append(document.createTextNode(r.name)); tr.append(nm);
+    for (const v of r.vals) tr.append(el("td", "n", v));
+    t.append(tr);
+  }
+  tipEl.replaceChildren(el("div", "th", head), t, ...notes.map(n => el("div", "ev", "⚑ " + n))); tipEl.hidden = false;
+  const r = tipEl.getBoundingClientRect();
+  tipEl.style.left = Math.max(4, Math.min(x + 14, innerWidth - r.width - 4)) + "px";
+  tipEl.style.top = Math.max(4, y + 14 + r.height > innerHeight ? y - r.height - 10 : y + 14) + "px";
+}
+const hideTip = () => { tipEl.hidden = true; };
+const colRange = g => i => { const a = g.t0 + i * g.colSec; return stamp(a, g) + " – " + stamp(a + g.colSec, g); };
+
+/** Pointer + arrow-key hover for a canvas panel; leave() when the pointer or focus goes away. */
+function attach(o, move, leave) {
+  const at = (i, ev) => {
+    const r = o.cv.getBoundingClientRect();
+    move(i, ev ? ev.clientX : r.left + o.lay.ML + (i + .5) * o.lay.cw, ev ? ev.clientY : r.top + r.height / 2);
+  };
+  o.cv.addEventListener("pointermove", ev => { const i = colAt(o, ev); i < 0 ? leave() : at(i, ev); });
+  o.cv.addEventListener("pointerleave", leave);
+  o.cv.addEventListener("blur", leave);
+  o.cv.addEventListener("keydown", ev => {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    const cur = o.hover >= 0 ? o.hover : o.g.n;
+    at(Math.max(0, Math.min(o.g.n - 1, cur + (ev.key === "ArrowLeft" ? -1 : 1))));
+  });
+}
+
+/**
+ * One set of controls + traffic chart + channel-load charts inside `host`.
+ * ranges: [[label, seconds, tier]], tier null = raw samples. `id` keys the remembered choice.
+ */
+function ChartView(host, id, ranges, defRange) {
+  const ui = {range: defRange, group: "band"}, hidden = new Set(), slotOf = new Map();
+  try {
+    const u = JSON.parse(localStorage.getItem("mt7996ui:" + id) || "{}");
+    if (Number.isInteger(u.range) && ranges[u.range]) ui.range = u.range;
+    if (u.group === "band" || u.group === "sta") ui.group = u.group;
+  } catch (e) {}
+  const save = () => { try { localStorage.setItem("mt7996ui:" + id, JSON.stringify(ui)); } catch (e) {} };
+  host.innerHTML = `
+    <section class="bar-row"><div class="seg" data-r="range" role="group" aria-label="Time range"></div>
+      <div class="seg" data-r="group" role="group" aria-label="Group traffic by"></div><span class="muted" data-r="coverage"></span></section>
+    <section class="card"><h2>Traffic <span class="muted" style="text-transform:none">(client throughput; hover for per-series values, click a legend entry to hide it)</span></h2>
+      <div class="pt"><b>Download</b> <span class="muted">AP → clients</span></div>
+      <canvas data-r="down" class="chart" tabindex="0" role="img" aria-label="Download throughput over time, stacked"></canvas>
+      <div class="pt"><b>Upload</b> <span class="muted">clients → AP</span></div>
+      <canvas data-r="up" class="chart" tabindex="0" role="img" aria-label="Upload throughput over time, stacked"></canvas>
+      <div class="legend" data-r="legend"></div>
+      <div class="scroll" data-r="stats"></div>
+      <details style="margin-top:8px"><summary class="muted">Table view (per series)</summary><div class="scroll" data-r="table"></div></details>
+    </section>
+    <section class="card"><h2>Channel load <span class="muted" style="text-transform:none">(airtime busy per link; y axis scales to the busiest bar)</span></h2>
+      <div class="legend static muted"><span><i class="sw" style="background:var(--s1)"></i>TX</span><span><i class="sw" style="background:var(--s3)"></i>RX</span><span><i class="sw" style="background:var(--other)"></i>other (neighbours, noise)</span></div>
+      <div class="grid" data-r="util" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))"></div></section>`;
+  const R = n => host.querySelector(`[data-r="${n}"]`);
+  const range = () => ranges[ui.range], tier = () => range()[2];
+  const tp = {down: {cv: R("down"), dir: "tx"}, up: {cv: R("up"), dir: "rx", xlabels: true}};
+  let tm = null, thover = -1, legendSig = "", utilSig = "";
+  const util = new Map();   // history_key -> panel
+
+  function model(w) {
+    const g = makeGrid(w, srvNow, range()[1], tier()), keys = new Set(Object.keys(hist));
+    for (let t = tier(); t; t = TIER[t].finer) Object.keys(tierData[t]?.data || {}).forEach(k => keys.add(k));
+    const ser = (sid, label, color, k) => ({id: sid, label, color, tx: bucket(points(k + ":tx", tier()), g), rx: bucket(points(k + ":rx", tier()), g)});
+    let defs = [];
+    if (ui.group === "band") {
+      const bands = new Set();
+      for (const k of keys) { const m = /^agg:(.+):tx$/.exec(k); if (m) bands.add(m[1]); }
+      const ord = b => BAND_ORDER.includes(b) ? BAND_ORDER.indexOf(b) : 99;
+      defs = [...bands].sort((a, b) => ord(a) - ord(b)).map(b => ser(b,
+        b === "MLD" ? "MLO (link unknown)" : b === "?" ? "unknown band" : b.replace("G", " GHz"), BAND_VAR[b] || "--other", "agg:" + b));
+    } else {
+      const macs = new Set();
+      for (const k of keys) { const m = /^sta:([0-9a-f]{2}(?::[0-9a-f]{2}){5}):tx$/i.exec(k); if (m) macs.add(m[1]); }
+      const all = [...macs].map(mac => { const d = ser(mac, mac, "", "sta:" + mac); d.vol = (sumOf(d.tx) + sumOf(d.rx)) * g.colSec / 8; return d; })
+        .sort((a, b) => b.vol - a.vol);
+      const top = all.filter(d => d.vol > 0).slice(0, NSLOT), keep = new Set(top.map(d => d.id));
+      for (const m of [...slotOf.keys()]) if (!keep.has(m)) slotOf.delete(m);   // survivors keep their color
+      for (const d of top) if (!slotOf.has(d.id)) {
+        const used = new Set(slotOf.values());
+        for (let i = 0; i < NSLOT; i++) if (!used.has(i)) { slotOf.set(d.id, i); break; }
+      }
+      for (const d of top) d.color = "--s" + (slotOf.get(d.id) + 1);
+      defs = top.sort((a, b) => slotOf.get(a.id) - slotOf.get(b.id));
+      const rest = all.filter(d => !keep.has(d.id));
+      if (rest.length) {
+        const nan = new Array(g.n).fill(NaN);
+        defs.push({id: "other", label: `Other (${rest.length})`, color: "--other",
+          tx: rest.reduce((a, d) => addNaN(a, d.tx), nan), rx: rest.reduce((a, d) => addNaN(a, d.rx), nan)});
+      }
+    }
+    const vis = defs.filter(d => !hidden.has(d.id));
+    const has = Array.from({length: g.n}, (_, i) => defs.some(d => !Number.isNaN(d.tx[i]) || !Number.isNaN(d.rx[i])));
+    const tot = dir => Array.from({length: g.n}, (_, i) => vis.reduce((s, d) => s + (d[dir][i] > 0 ? d[dir][i] : 0), 0));
+    return {g, defs, vis, has, tot: {tx: tot("tx"), rx: tot("rx")}};
+  }
+
+  function drawTraffic() {
+    if (!tm) return;
+    const ev = evMarks(tm.g);
+    for (const o of Object.values(tp)) {
+      Object.assign(o, {g: tm.g, stacks: i => tm.vis.map(d => d[o.dir][i]), colors: tm.vis.map(d => d.color),
+        max: niceMax(Math.max(0, ...tm.tot[o.dir])), fmtY: fmtRate, has: tm.has, hover: thover, events: ev});
+      drawPanel(o);
+    }
+  }
+  function trafficTip(i, x, y) {
+    const rows = tm.vis.map(d => ({color: d.color, name: d.label, a: d.tx[i], b: d.rx[i]}))
+      .filter(r => r.a > .005 || r.b > .005).sort((p, q) => (q.a || 0) + (q.b || 0) - (p.a || 0) - (p.b || 0))
+      .map(r => ({color: r.color, name: r.name, vals: [fmtRate(r.a), fmtRate(r.b)]}));
+    if (!rows.length) rows.push({name: tm.has[i] ? "idle" : "no data", vals: ["", ""]});
+    rows.push({name: "Total", total: true, vals: [fmtRate(tm.tot.tx[i]), fmtRate(tm.tot.rx[i])]});
+    const g = tm.g, a = g.t0 + i * g.colSec;
+    showTip(colRange(g)(i), ["↓ down", "↑ up"], rows, evMarks({t0: a, t1: a + g.colSec}).map(e => e.msg), x, y);
+  }
+  function trafficLeave() { if (thover < 0) return; thover = -1; hideTip(); renderTraffic(); }
+  for (const o of Object.values(tp)) attach(o, (i, x, y) => { thover = i; drawTraffic(); trafficTip(i, x, y); }, trafficLeave);
+
+  function totalsFor(dir) {
+    const v = []; let sum = 0;
+    tm.tot[dir].forEach((x, i) => { if (tm.has[i]) { v.push(x); sum += x; } });
+    v.sort((a, b) => a - b);
+    return {vol: sum * tm.g.colSec / 8, avg: v.length ? sum / v.length : NaN,
+      p95: v.length ? v[Math.floor(.95 * (v.length - 1))] : NaN, peak: v.length ? v[v.length - 1] : NaN};
+  }
+  function renderStats() {
+    const row = (n, d) => { const t = totalsFor(d); return `<tr><td>${n}</td><td class="num">${fmtVol(t.vol)}</td><td class="num">${fmtRate(t.avg)}</td>
+      <td class="num">${fmtRate(t.p95)}</td><td class="num">${fmtRate(t.peak)}</td></tr>`; };
+    R("stats").innerHTML = `<table class="mini"><tr><th>Shown period</th><th class="num">Volume</th><th class="num">Average</th><th class="num">95th percentile</th><th class="num">Peak</th></tr>
+      ${row("↓ Download", "tx")}${row("↑ Upload", "rx")}</table>
+      <div class="muted" style="font-size:11px;margin-top:4px">Computed from ${fmtSpan(tm.g.colSec)} columns of the stored samples, so short bursts inside a column are averaged out; periods without data are left out. Visible series only.</div>`;
+    let h = `<table class="mini"><tr><th>Series</th><th class="num">↓ Volume</th><th class="num">↓ Average</th><th class="num">↓ Peak</th><th class="num">↑ Volume</th><th class="num">↑ Average</th><th class="num">↑ Peak</th></tr>`;
+    for (const d of tm.defs) {
+      const st = k => { const v = d[k].filter(x => x >= 0); return [sumOf(d[k]) * tm.g.colSec / 8, v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN, v.length ? Math.max(...v) : NaN]; };
+      const [a, b] = [st("tx"), st("rx")];
+      h += `<tr><td>${esc(d.label)}${hidden.has(d.id) ? " (hidden)" : ""}</td><td class="num">${fmtVol(a[0])}</td><td class="num">${fmtRate(a[1])}</td><td class="num">${fmtRate(a[2])}</td>
+        <td class="num">${fmtVol(b[0])}</td><td class="num">${fmtRate(b[1])}</td><td class="num">${fmtRate(b[2])}</td></tr>`;
+    }
+    R("table").innerHTML = tm.defs.length ? h + "</table>" : '<div class="muted">no data yet</div>';
+  }
+  function renderLegend() {
+    const lg = R("legend"), sig = tm.defs.map(d => d.id + (hidden.has(d.id) ? "-" : "+") + d.color).join("|");
+    if (sig !== legendSig) {
+      legendSig = sig;
+      lg.replaceChildren(...tm.defs.map(d => {
+        const b = document.createElement("button"), sw = document.createElement("i"), nm = document.createElement("span"), v = document.createElement("span");
+        b.className = "lg" + (hidden.has(d.id) ? " off" : ""); b.setAttribute("aria-pressed", String(!hidden.has(d.id)));
+        sw.className = "sw"; sw.style.background = `var(${d.color})`; nm.textContent = d.label; v.className = "lv";
+        b.append(sw, nm, v);
+        b.addEventListener("click", () => { hidden.has(d.id) ? hidden.delete(d.id) : hidden.add(d.id); renderTraffic(); });
+        return b;
+      }));
+      if (!tm.defs.length) lg.innerHTML = '<span class="muted">collecting data…</span>';
+    }
+    lg.querySelectorAll("button.lg").forEach((b, i) => {
+      const d = tm.defs[i];
+      if (d) b.querySelector(".lv").textContent = "↓ " + fmtVol(sumOf(d.tx) * tm.g.colSec / 8) + "  ↑ " + fmtVol(sumOf(d.rx) * tm.g.colSec / 8);
+    });
+  }
+  function renderTraffic() {
+    const w = tp.down.cv.clientWidth;
+    if (!w) return;
+    tm = model(w - 64);
+    renderLegend(); renderStats(); drawTraffic();
+    const first = tm.has.indexOf(true);
+    R("coverage").textContent = first < 0 ? "no data yet" : first > 1 ? "history starts " + stamp(tm.g.t0 + first * tm.g.colSec, {...tm.g, colSec: 60}) : "";
+  }
+
+  // channel load: one stacked panel per radio link (tx / rx / other busy)
+  function renderUtil() {
+    if (!lastSt) return;
+    const rs = lastSt.radios.filter(r => r.history_key), sig = rs.map(r => r.history_key).join("|"), uh = R("util");
+    if (sig !== utilSig) {
+      utilSig = sig; util.clear(); uh.replaceChildren();
+      for (const r of rs) {
+        const card = document.createElement("div"), t = document.createElement("div"), cv = document.createElement("canvas");
+        card.className = "card"; cv.className = "chart sm"; cv.tabIndex = 0; cv.setAttribute("role", "img");
+        cv.setAttribute("aria-label", `Channel busy time of ${r.band} link over time`);
+        t.innerHTML = `<span class="band ${bandCls(r.band)}">${esc(r.band)}</span> ch ${esc(r.channel)} · ${esc(r.width)} MHz <span class="muted">${esc(r.iface)}${r.link != null ? " · link " + esc(r.link) : ""}</span>`;
+        card.append(t, cv); uh.append(card);
+        const o = {cv, key: r.history_key.replace(/:busy$/, ""), hover: -1, xlabels: true, fmtY: fmtPct, colors: ["--s1", "--s3", "--other"]};
+        attach(o, (i, x, y) => {
+          o.hover = i; drawPanel(o);
+          const b = o.busy[i], tx = o.tx[i] || 0, rx = o.rx[i] || 0, other = Math.max(0, b - tx - rx);
+          showTip(colRange(o.g)(i), [""], Number.isNaN(b) ? [{name: "no data", vals: [""]}] : [
+            {color: "--s1", name: "TX", vals: [fmtPct(tx)]}, {color: "--s3", name: "RX", vals: [fmtPct(rx)]},
+            {color: "--other", name: "Other", vals: [fmtPct(other)]}, {name: "Busy", total: true, vals: [fmtPct(b)]}], [], x, y);
+        }, () => { if (o.hover < 0) return; o.hover = -1; hideTip(); renderUtil(); });
+        util.set(r.history_key, o);
+      }
+      if (!rs.length) uh.innerHTML = '<div class="muted">no survey data</div>';
+    }
+    for (const o of util.values()) {
+      if (o.hover >= 0) continue;   // frozen while the pointer is on it
+      const g = makeGrid(o.cv.clientWidth - 64, srvNow, range()[1], tier());
+      o.g = g; o.busy = bucket(points(o.key + ":busy", tier()), g); o.tx = bucket(points(o.key + ":tx", tier()), g); o.rx = bucket(points(o.key + ":rx", tier()), g);
+      o.has = o.busy.map(v => !Number.isNaN(v));
+      o.stacks = i => [o.tx[i] || 0, o.rx[i] || 0, Math.max(0, o.busy[i] - (o.tx[i] || 0) - (o.rx[i] || 0))];
+      o.max = niceMax(Math.max(0, ...o.busy.filter(v => v >= 0)), 10);
+      drawPanel(o);
+    }
+  }
+
+  const need = () => { const out = []; for (let t = tier(); t; t = TIER[t].finer) out.push(t); return out; };
+  const visible = () => host.offsetParent !== null;
+  const view = {
+    async refresh(force) {
+      if (!visible()) return;
+      await Promise.all(need().map(t => fetchTier(t, force)));
+      if (thover < 0) renderTraffic();   // frozen while the pointer is on a traffic chart
+      renderUtil();
+    },
+    redraw() { if (!visible()) return; if (thover < 0) renderTraffic(); renderUtil(); },
+  };
+  const seg = (name, items, cur, set) => {
+    const box = R(name);
+    items.forEach(([val, label]) => {
+      const b = document.createElement("button"); b.textContent = label;
+      b.addEventListener("click", () => { set(val); save(); sync(); syncAll(); view.refresh(true); });
+      box.append(b);
+    });
+    const sync = () => box.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(items[i][0] === cur())));
+    sync(); return sync;
+  };
+  const syncR = seg("range", ranges.map((r, i) => [i, r[0]]), () => ui.range, v => { ui.range = v; });
+  const syncG = seg("group", [["band", "By band"], ["sta", "By station"]], () => ui.group, v => { ui.group = v; });
+  const syncAll = () => { syncR(); syncG(); };
+  views.push(view);
+  return view;
+}
+
+const liveView = ChartView($("liveCharts"), "live", [["10 min", 600, null], ["1 h", 3600, "1m"]], 0);
+const histView = ChartView($("histCharts"), "history", [["6 h", 21600, "1m"], ["24 h", 86400, "1m"], ["7 days", 604800, "10m"], ["30 days", 2592000, "10m"], ["1 year", 31536000, "1h"]], 1);
+
+// ---- tabs
+function showTab(name) {
+  if (name !== "live" && name !== "history") name = "live";
+  $("tab-live").hidden = name !== "live"; $("tab-history").hidden = name !== "history";
+  document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+  try { sessionStorage.setItem("mt7996tab", name); } catch (e) {}
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  (name === "live" ? liveView : histView).refresh(false);
+  if (name === "live") drawSparks();
+}
+document.querySelector("nav.tabs").addEventListener("click", ev => { const b = ev.target.closest("button[data-tab]"); if (b) showTab(b.dataset.tab); });
+addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
 // ------------------------------------------------------------ control ----
 let ctlInfo = {enabled: false, dry_run: false};
 const toast = (msg, bad) => {
@@ -329,6 +788,7 @@ async function tick() {
     const st = await (await fetch("/api/state", {cache: "no-store"})).json();
     next = Math.max(500, (st.interval || 2) * 1000);
     hist = await (await fetch("/api/history", {cache: "no-store"})).json();
+    lastSt = st; srvNow = st.ts || srvNow; pollSec = st.interval || 2;
     $("host").textContent = st.host;
     $("demo").hidden = !st.demo;
     $("upd").textContent = st.ts ? "updated " + new Date(st.ts * 1000).toLocaleTimeString() : "";
@@ -336,6 +796,7 @@ async function tick() {
     renderCtl(st); renderRadios(st); renderStas(st); renderPlan(st); renderAirtime(st); renderSteer(st); renderHw(st);
     await pollEvents().catch(() => {});
     drawSparks();
+    for (const v of views) await v.refresh(false);
   } catch (e) {
     $("errors").innerHTML = `<p class="err">⚠ cannot reach daemon: ${esc(e.message)}</p>`;
   }
@@ -350,7 +811,10 @@ $("stas").addEventListener("click", ev => {
   // re-render immediately from the last fetch
   fetch("/api/state").then(r => r.json()).then(st => { renderStas(st); drawSparks(); });
 });
-addEventListener("resize", drawSparks);
+addEventListener("resize", () => { drawSparks(); views.forEach(v => v.redraw()); });
+let startTab = "live";
+try { startTab = sessionStorage.getItem("mt7996tab") || "live"; } catch (e) {}
+showTab(location.hash.slice(1) || startTab);
 tick();
 </script>
 </body>
