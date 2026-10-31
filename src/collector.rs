@@ -178,11 +178,13 @@ impl Collector {
             }
         }
         for r in &mut radios {
-            r.stations = counts
-                .get(&(r.iface.clone(), r.link))
-                .or_else(|| counts.get(&(r.iface.clone(), None)))
-                .copied()
-                .unwrap_or(0);
+            let unlinked = counts.get(&(r.iface.clone(), None)).copied().unwrap_or(0);
+            if r.link.is_some() {
+                r.stations = counts.get(&(r.iface.clone(), r.link)).copied().unwrap_or(0);
+                r.stations_unlinked = unlinked;
+            } else {
+                r.stations = unlinked;
+            }
         }
 
         gc(inner, now);

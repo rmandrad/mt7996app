@@ -109,11 +109,16 @@ pub fn parse_iw_dev(text: &str) -> Vec<Iface> {
             continue;
         }
         let Some(ifc) = out.last_mut() else { continue };
-        if let Some(c) = re!(r"(?i)^link\s+(\d+)\b").captures(s) {
+        // "link 0 ..." (older iw) or "- link ID  0 link addr XX" (MLD with links:)
+        if let Some(c) = re!(r"(?i)^(?:-\s*)?link(?:\s+ID)?\s+(\d+)\b").captures(s) {
             let id: u32 = c[1].parse().unwrap_or(0);
-            ifc.links.entry(id).or_default();
+            let l = ifc.links.entry(id).or_default();
             cur_link = Some(id);
             s = s[c.get(0).unwrap().end()..].trim_matches(|ch| ch == ' ' || ch == ':');
+            if let Some(a) = s.strip_prefix("link addr ").or_else(|| s.strip_prefix("addr ")) {
+                l.addr = Some(a.trim().to_string());
+                continue;
+            }
             if s.is_empty() {
                 continue;
             }
@@ -191,6 +196,7 @@ fn fill_sta(d: &mut Stats, key: &str, val: &str) {
         "link address" | "link addr" | "addr" => d.addr = Some(val.to_string()),
         "rx duration" => d.rx_airtime_us = num(val),
         "tx duration" => d.tx_airtime_us = num(val),
+        "airtime weight" => d.airtime_weight = num(val),
         _ => {}
     }
 }
@@ -288,6 +294,45 @@ mod tests {
         assert_eq!(v[1].links[&0].addr.as_deref(), Some("02:00:00:00:00:01"));
         assert_eq!(v[1].links[&1].width, Some(160));
         assert_eq!(band_of(v[1].links[&1].freq), Some("6G"));
+    }
+
+    // Captured from a BPI-R4 (iw on the router) with a 2-link MLD AP.
+    const REAL_IW_DEV: &str = "phy#0\n\tInterface wlan0\n\t\tifindex 17\n\t\twdev 0x2\n\t\taddr 00:0c:43:26:60:20\n\t\tssid banana\n\t\ttype AP\n\t\tmulticast TXQ:\n\t\t\tqsz-byt\tqsz-pkt\tflows\tdrops\tmarks\toverlmt\thashcol\ttx-bytes\ttx-packets\n\t\t\t0\t0\t9\t0\t0\t0\t0\t360\t\t18\n\t\tMLD with links:\n\t\t - link ID  0 link addr 00:0c:43:26:60:22\n\t\t   channel 100 (5500 MHz), width: 160 MHz, center1: 5570 MHz\n\t\t   txpower 26.00 dBm\n\t\t - link ID  1 link addr 00:0c:43:26:60:23\n\t\t   channel 21 (6055 MHz), width: 320 MHz, center1: 6105 MHz\n\t\t   txpower 26.00 dBm\n";
+
+    #[test]
+    fn real_mld_iw_dev() {
+        let v = parse_iw_dev(REAL_IW_DEV);
+        assert_eq!(v.len(), 1);
+        let i = &v[0];
+        assert_eq!((i.name.as_str(), i.ssid.as_deref(), i.kind.as_deref()), ("wlan0", Some("banana"), Some("AP")));
+        assert_eq!(i.base.addr.as_deref(), Some("00:0c:43:26:60:20"));
+        assert!(i.mlo());
+        assert_eq!(i.links.len(), 2);
+        assert_eq!(i.links[&0].addr.as_deref(), Some("00:0c:43:26:60:22"));
+        assert_eq!((i.links[&0].channel, i.links[&0].freq, i.links[&0].width), (Some(100), Some(5500), Some(160)));
+        assert_eq!(band_of(i.links[&0].freq), Some("5G"));
+        assert_eq!((i.links[&1].channel, i.links[&1].width, i.links[&1].center1), (Some(21), Some(320), Some(6105)));
+        assert_eq!(i.links[&1].txpower, Some(26.0));
+        // nothing leaked into the interface-level channel
+        assert_eq!(i.base.freq, None);
+    }
+
+    const REAL_STA: &str = "Station 10:91:d1:f7:5e:bd (on wlan0)\n\tauthorized:\tyes\n\tauthenticated:\tyes\n\tassociated:\tyes\n\tpreamble:\tshort\n\tWMM/WME:\tyes\n\tMFP:\t\tyes\n\tTDLS peer:\tno\n\tinactive time:\t5 ms\n\trx bytes:\t23434422\n\trx packets:\t120609\n\ttx bytes:\t295847752\n\ttx packets:\t272896\n\ttx retries:\t0\n\ttx failed:\t7\n\trx drop misc:\t209\n\tsignal:  \t-51 dBm\n\tsignal avg:\t-51 dBm\n\ttx bitrate:\t1729.3 MBit/s 320MHz EHT-MCS 4 EHT-NSS 2 EHT-GI 0\n\ttx duration:\t48443546 us\n\trx duration:\t23927946 us\n\tlast ack signal:-66 dBm\n\tavg ack signal:\t-66 dBm\n\tairtime weight:\t256\n\tDTIM period:\t1\n\tbeacon interval:100\n\tconnected time:\t1931 seconds\n\tassociated at [boottime]:\t37788.844s\n\tassociated at:\t1793460613185 ms\n\tcurrent time:\t1793462544003 ms\n";
+
+    #[test]
+    fn real_station_dump() {
+        let v = parse_station_dump(REAL_STA);
+        assert_eq!(v.len(), 1);
+        let s = &v[0];
+        assert_eq!(s.mac, "10:91:d1:f7:5e:bd");
+        assert!(!s.mlo && s.links.is_empty());
+        let st = &s.stats;
+        assert_eq!((st.tx_bytes, st.rx_bytes, st.tx_pkts, st.tx_retries, st.tx_failed), (Some(295847752), Some(23434422), Some(272896), Some(0), Some(7)));
+        assert_eq!((st.signal, st.signal_avg, st.inactive_ms, st.connected_s), (Some(-51), Some(-51), Some(5), Some(1931)));
+        let r = st.tx_rate.as_ref().unwrap();
+        assert_eq!((r.mbps, r.mcs, r.nss, r.width, r.proto.as_str()), (Some(1729.3), Some(4), Some(2), Some(320), "be"));
+        assert_eq!((st.tx_airtime_us, st.rx_airtime_us, st.airtime_weight), (Some(48443546), Some(23927946), Some(256)));
+        assert_eq!(st.authorized, Some(true));
     }
 
     #[test]

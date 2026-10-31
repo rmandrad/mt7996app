@@ -1,7 +1,8 @@
 //! Readers/parsers for the mt7996 debugfs files.
 //!
 //! Layout (see drivers/net/wireless/mediatek/mt76/mt7996/debugfs.c):
-//!   <root>/phyN/mt76/{tx_stats,xmit-queues,twt_stats,rdd_monitor,sys_recovery,..}
+//!   <root>/phyN/mt76/{tx_stats,xmit-queues,twt_stats,rdd_monitor,..}
+//! (sys_recovery is deliberately not polled: it is help text plus SER register reads)
 //!   <root>/phyN/netdev:IF/stations/MAC/link-N/addr
 use crate::model::*;
 use regex::Regex;
@@ -131,7 +132,6 @@ pub fn read_hw(phy: &str, root: &str) -> Hw {
     hw.twt = rd("twt_stats").map(|t| parse_twt(&t)).unwrap_or_default();
     hw.rdd = trimmed("rdd_monitor");
     hw.dfs_hw_pattern = trimmed("dfs_hw_pattern");
-    hw.sys_recovery = trimmed("sys_recovery");
     hw
 }
 

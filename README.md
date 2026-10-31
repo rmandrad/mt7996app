@@ -189,10 +189,11 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 
 ## Known limitations
 
-- **MLO output formats are unverified.** `iw`'s per-link layout for MLD interfaces and MLO stations differs between
-  versions; the parsers accept `link N` blocks leniently, and per-link station addresses additionally come from
-  mac80211's `link-N` debugfs directories. If a section is empty on your build, run `iw dev wlan0 station dump`
-  and open an issue with the output.
+- **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). The format of
+  `iw dev X station dump` for an *MLO client* (per-link blocks) is **not yet verified**: a single-link client on an
+  MLD AP is reported without link information, so the UI lists it as "link unknown". Per-link addresses of MLO
+  stations additionally come from mac80211's `link-N` debugfs directories. If an MLO client shows no links, send
+  the output of `iw dev wlan0 station dump`.
 - `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`
   lines; the UI shows them by band index and does not map them to 2.4/5/6 GHz.
 - `iw` survey data only covers channels the radio has visited, so noise/busy % is shown for the in-use channel.

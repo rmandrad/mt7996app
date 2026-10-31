@@ -117,7 +117,7 @@ function renderRadios(st) {
         <span>TX power</span><span>${fmt(r.txpower, 1, " dBm")}</span>
         <span>Noise</span><span>${fmt(r.noise, 0, " dBm")}</span>
         <span>Busy</span><span>${fmt(r.busy_pct, 1, " %")} <span class="muted">(tx ${fmt(r.tx_pct, 1)} / rx ${fmt(r.rx_pct, 1)})</span></span>
-        <span>Stations</span><span>${r.stations}</span>
+        <span>Stations</span><span>${r.stations}${r.stations_unlinked ? ` <span class="muted">(+${r.stations_unlinked} link unknown)</span>` : ""}</span>
       </div>
       <div class="bar"><i style="width:${Math.min(100, r.busy_pct || 0)}%"></i></div>
       ${r.history_key ? `<canvas data-h="${esc(r.history_key)}" data-c="--${bandCls(r.band)}"></canvas>` : ""}
@@ -152,7 +152,7 @@ function renderStas(st) {
     if (exp) {
       h += `<tr class="detail"><td colspan="8">
         <div class="muted">connected ${fmt(s.connected_s, 0, " s")} · inactive ${fmt(s.inactive_ms, 0, " ms")}
-          · chains ${esc((s.chains || []).join(", ") || "–")} · ${s.authorized ? "authorized" : ""}</div>
+          · chains ${esc((s.chains || []).join(", ") || "–")}${s.airtime_weight ? " · airtime weight " + s.airtime_weight : ""} · ${s.authorized ? "authorized" : ""}</div>
         <div class="links" style="margin-top:8px">
           <div class="card"><div>total throughput</div>
             <canvas data-h="sta:${esc(s.mac)}:tx" data-c="--accent"></canvas></div>

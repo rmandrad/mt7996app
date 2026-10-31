@@ -34,6 +34,7 @@ pub struct Stats {
     pub connected_s: Option<u64>,
     pub authorized: Option<bool>,
     pub expected_mbps: Option<f64>,
+    pub airtime_weight: Option<u32>,
     pub tx_airtime_us: Option<u64>,
     pub rx_airtime_us: Option<u64>,
     // derived by the collector
@@ -145,7 +146,6 @@ pub struct Hw {
     pub twt: Vec<Twt>,
     pub rdd: Option<String>,
     pub dfs_hw_pattern: Option<String>,
-    pub sys_recovery: Option<String>,
 }
 
 /// One undigested sample from a Source.
@@ -181,6 +181,8 @@ pub struct Radio {
     pub tx_pct: Option<f64>,
     pub rx_pct: Option<f64>,
     pub stations: usize,
+    /// stations on an MLD interface whose link iw does not report
+    pub stations_unlinked: usize,
     pub history_key: Option<String>,
 }
 
