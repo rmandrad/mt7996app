@@ -358,8 +358,11 @@ function points(key, tier) {
 function makeGrid(w, now, range, tier) {
   const maxCols = Math.max(20, Math.floor(w / 5));
   if (!tier) {
-    const n = Math.max(10, Math.min(maxCols, Math.floor(range / (1.5 * Math.max(pollSec, .2)))));
-    return {n, colSec: range / n, t0: now - range, t1: now};
+    // Columns are whole multiples of the poll interval and sit on fixed clock times, so a column
+    // holds the same samples on every redraw and a finished (past) bar never changes height.
+    const poll = Math.max(pollSec, .2), colSec = poll * Math.max(1, Math.ceil(range / poll / maxCols)), n = Math.ceil(range / colSec);
+    const t1 = (Math.floor(now / colSec) + 1) * colSec;
+    return {n, colSec, t0: t1 - n * colSec, t1};
   }
   const slot = TIER[tier].secs, colSec = slot * Math.max(1, Math.ceil(range / slot / maxCols)), n = Math.ceil(range / colSec);
   const t1 = (Math.floor(now / colSec) + 1) * colSec;
