@@ -29,6 +29,8 @@ const NL80211_ATTR_MAC: u16 = 6;
 const NL80211_ATTR_STA_INFO: u16 = 21;
 const NL80211_ATTR_MLO_LINKS: u16 = 312;
 const NL80211_ATTR_MLO_LINK_ID: u16 = 313;
+/// flag: also send one message per link (aggregate message first)
+const NL80211_ATTR_STA_DUMP_LINK_STATS: u16 = 367;
 
 const STA_INACTIVE_TIME: u16 = 1;
 const STA_RX_BYTES: u16 = 2;
@@ -282,6 +284,15 @@ pub fn merge_stations(msgs: impl IntoIterator<Item = (String, Option<Stats>, Vec
     v
 }
 
+/// Attributes of a station dump request: the interface, and the flag that
+/// makes the kernel include the per-link statistics of MLO stations.
+fn station_dump_request(ifindex: u32) -> Vec<u8> {
+    let mut a = vec![];
+    put_attr(&mut a, NL80211_ATTR_IFINDEX, &ifindex.to_ne_bytes());
+    put_attr(&mut a, NL80211_ATTR_STA_DUMP_LINK_STATS, &[]);
+    a
+}
+
 // ---------------------------------------------------------------- socket --
 
 pub struct Nl {
@@ -388,8 +399,7 @@ impl Nl {
 
     /// Dump all stations of an interface, including per-link statistics.
     pub fn dump_stations(&mut self, ifindex: u32) -> io::Result<Vec<NlStation>> {
-        let mut a = vec![];
-        put_attr(&mut a, NL80211_ATTR_IFINDEX, &ifindex.to_ne_bytes());
+        let a = station_dump_request(ifindex);
         let family = self.family;
         let replies = self.transact(family, NLM_F_REQUEST | NLM_F_DUMP, NL80211_CMD_GET_STATION, &a)?;
         Ok(merge_stations(replies.iter().filter_map(|r| parse_station_attrs(r))))
@@ -500,6 +510,15 @@ mod tests {
             let _ = parse_station_attrs(&m[..n]);
         }
         assert!(parse_station_attrs(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn dump_requests_link_stats() {
+        let r: Vec<(u16, Vec<u8>)> = attrs(&station_dump_request(17)).map(|(t, v)| (t, v.to_vec())).collect();
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].0, u32_of(&r[0].1)), (NL80211_ATTR_IFINDEX, Some(17)));
+        // without this flag the kernel sends no per-link messages at all
+        assert_eq!((r[1].0, r[1].1.len()), (367, 0));
     }
 
     #[test]
