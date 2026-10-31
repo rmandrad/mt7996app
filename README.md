@@ -1,0 +1,216 @@
+# mt7996app
+
+A small, dependency-light daemon plus web dashboard for **MediaTek mt7996 (Wi-Fi 7) access points**
+such as the Banana Pi BPI-R4. It shows what MLO (multi-link operation) is actually doing:
+
+- **Radios / links** – channel, width, TX power, noise floor and airtime busy/tx/rx % per link (2.4 / 5 / 6 GHz).
+- **Stations** – signal, throughput, retry ratio and rates per client; MLO clients expand into a per-link breakdown with history graphs.
+- **Hardware counters** (mt76 debugfs) – TX attempts / success / PER, BA misses, A-MSDU histogram, xmit queues, TWT flows, DFS background-radar state.
+
+It is **read-only**: it never changes radio configuration. Written in Rust (std + `serde`, `regex`, `tiny_http`); the
+web UI is a single embedded HTML file with no external assets.
+
+> Status: version 0.1. Parsers are unit-tested against sample `iw` / debugfs output and the whole pipeline runs in
+> `--demo` mode, but it has **not yet been run against real mt7996 hardware**. See [Known limitations](#known-limitations).
+
+## How it works
+
+Every `--interval` seconds (default 2 s) the collector reads:
+
+| Source | Used for |
+|---|---|
+| `iw dev` | interfaces, channels, widths, TX power, per-link info of MLD interfaces |
+| `iw dev <if> station dump` | per-station and per-link counters, signal, rates |
+| `iw dev <if> survey dump` | noise floor, channel busy/tx/rx airtime |
+| `/sys/kernel/debug/ieee80211/phyN/mt76/*` | `tx_stats`, `xmit-queues`, `twt_stats`, `rdd_monitor`, ... |
+| `/sys/kernel/debug/ieee80211/phyN/netdev:IF/stations/MAC/link-N/` | per-link addresses of MLO stations |
+
+Throughput, retry ratio and busy % are computed as deltas between samples (counter resets on re-association are
+detected and skipped). The last 300 samples of each series are kept in memory and served to the UI.
+
+Only phys bound to the `mt7996e` driver are shown, unless you pass `--any-driver`.
+
+## Requirements
+
+- A Linux system with an mt7996 card/SoC radio running as an AP (mac80211 / mt76 driver).
+- `iw` installed and in `PATH`.
+- Root (or a user that can read debugfs) for the hardware panels. Without it the wireless panels still work and
+  the UI shows a warning.
+- debugfs mounted: `mount -t debugfs none /sys/kernel/debug` (usually already mounted).
+- To build: Rust 1.80+ (`rustup`).
+
+## Try it without hardware
+
+```sh
+cargo run --release -- --demo
+# open http://127.0.0.1:8996/
+```
+
+Demo mode simulates an AP with a 3-link MLD (2.4 / 5 / 6 GHz), an MLO phone, a Wi-Fi 6 laptop and a 2.4 GHz IoT device.
+
+## Build
+
+```sh
+git clone git@github.com:rmandrad/mt7996app.git
+cd mt7996app
+cargo build --release          # binary: target/release/mt7996app
+cargo test                     # parser / collector unit tests
+```
+
+### Cross-compile for the BPI-R4 (aarch64)
+
+All dependencies are pure Rust, so a static musl binary works well on OpenWrt and Debian alike.
+The simplest route is [`cross`](https://github.com/cross-rs/cross) (needs Docker or Podman):
+
+```sh
+cargo install cross
+cross build --release --target aarch64-unknown-linux-musl
+# binary: target/aarch64-unknown-linux-musl/release/mt7996app
+```
+
+Without `cross`, install an aarch64 cross toolchain, add the target and set the linker:
+
+```sh
+rustup target add aarch64-unknown-linux-musl
+mkdir -p .cargo && cat > .cargo/config.toml <<'CFG'
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"   # or your musl cross gcc
+CFG
+cargo build --release --target aarch64-unknown-linux-musl
+```
+
+## Install on the router
+
+```sh
+scp target/aarch64-unknown-linux-musl/release/mt7996app root@<router>:/usr/local/bin/
+ssh root@<router> 'opkg install iw || apt install iw'   # whichever your distro uses
+ssh root@<router> 'mt7996app --once'                    # quick sanity check
+```
+
+`--once` samples twice and prints a text summary (add `--json` for the full state), which is the quickest way to
+check that `iw` and debugfs are being read correctly.
+
+### Run it
+
+```sh
+mt7996app                              # http://127.0.0.1:8996/ on the router
+mt7996app --bind 0.0.0.0 --port 8996   # reachable from the LAN (see Security)
+```
+
+**systemd** (Debian/Armbian/Arch ARM):
+
+```ini
+# /etc/systemd/system/mt7996app.service
+[Unit]
+Description=mt7996 live dashboard
+After=network.target hostapd.service
+
+[Service]
+ExecStart=/usr/local/bin/mt7996app --bind 127.0.0.1 --port 8996
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload && systemctl enable --now mt7996app
+```
+
+**OpenWrt** (procd):
+
+```sh
+#!/bin/sh /etc/rc.common
+# /etc/init.d/mt7996app  (chmod +x, then: /etc/init.d/mt7996app enable && start)
+START=95
+USE_PROCD=1
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/local/bin/mt7996app --bind 127.0.0.1 --port 8996
+    procd_set_param respawn
+    procd_close_instance
+}
+```
+
+### Choosing the listen address and port
+
+The default is `127.0.0.1:8996`. Change it with a flag or an environment variable
+(command line wins over environment, environment wins over the default):
+
+```sh
+mt7996app --listen 192.168.1.1:8080       # one specific interface address
+mt7996app --listen 0.0.0.0:8080           # all IPv4 interfaces
+mt7996app --listen '[::]:8080'            # all IPv6 (and usually IPv4) interfaces
+mt7996app --listen :8080                  # keep the default address, change the port
+mt7996app --bind 192.168.1.1 --port 8080  # same as the first line
+
+MT7996APP_LISTEN=192.168.1.1:8080 mt7996app
+```
+
+For a service, put it in the unit file, e.g. systemd:
+`Environment=MT7996APP_LISTEN=192.168.1.1:8080` (or add `--listen ...` to `ExecStart`), and on OpenWrt change the
+`--bind`/`--port` arguments in the procd script, or use `procd_set_param env MT7996APP_LISTEN=...`.
+Only addresses that exist on the machine can be bound; the program exits with an error otherwise.
+
+### Security
+
+The HTTP server has **no authentication** and exposes client MAC addresses and traffic statistics. It binds to
+`127.0.0.1` by default. To view it from your workstation, use an SSH tunnel instead of opening the port:
+
+```sh
+ssh -L 8996:127.0.0.1:8996 root@<router>
+# then browse http://127.0.0.1:8996/
+```
+
+Only listen on `0.0.0.0` / a LAN address on a trusted management network or behind a firewall rule.
+
+## Options
+
+```
+--listen ADDR:PORT  web server address, e.g. 0.0.0.0:8080, 192.168.1.1:8996, [::1]:8996, :8080
+--bind ADDR       listen address only (default 127.0.0.1)
+--port N          listen port only (default 8996)
+--interval SECS   poll interval (default 2, minimum 0.2)
+--demo            synthetic data, no hardware needed
+--any-driver      include non-mt7996 wifi phys
+--iw PATH         path to the iw binary
+--debugfs PATH    debugfs ieee80211 root (default /sys/kernel/debug/ieee80211)
+--once [--json]   sample twice, print a summary (or JSON) and exit
+```
+
+## HTTP API
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | the dashboard |
+| `GET /api/state` | latest sample: `radios`, `stations` (with `links`), `hw`, `errors` |
+| `GET /api/history` | time series `{ key: [[ts, value], ...] }`, e.g. `sta:<mac>:l2:tx`, `chan:wlan0:5180:busy` |
+
+## Known limitations
+
+- **MLO output formats are unverified.** `iw`'s per-link layout for MLD interfaces and MLO stations differs between
+  versions; the parsers accept `link N` blocks leniently, and per-link station addresses additionally come from
+  mac80211's `link-N` debugfs directories. If a section is empty on your build, run `iw dev wlan0 station dump`
+  and open an issue with the output.
+- `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`
+  lines; the UI shows them by band index and does not map them to 2.4/5/6 GHz.
+- `iw` survey data only covers channels the radio has visited, so noise/busy % is shown for the in-use channel.
+- Retry % is `tx retries / (tx packets + tx retries)` from `iw` counters, an approximation of the MPDU retry rate.
+
+## Roadmap
+
+Ideas, roughly in order. The first two are read-only; anything that changes radio or client state would be opt-in
+(e.g. a `--allow-control` flag) and off by default.
+
+1. **DFS / event log** – record channel changes, radar state (`rdd_monitor`), firmware recovery and station/MLO-link
+   join/leave events.
+2. **Channel and interference planner** – recommend a channel (and, with per-20 MHz occupancy from scan data, a
+   puncturing pattern) from survey and scan data; advisory first, applying via hostapd later.
+3. **Per-client airtime fairness controller** – adjust airtime weights from per-station stats.
+4. **Roaming / band-steering assistant** – 802.11k/v/r steering of single-link clients, leaving MLO clients alone.
+5. **Throughput test harness** – iperf3 matrix across bandwidth / MLO mode for regression testing mt76 changes.
+
+## License
+
+GPL-2.0-only, matching the Linux kernel driver it monitors.

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mt7996 Monitor</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #fff; --fg: #1b1f24; --muted: #6a737d; --line: #e1e4e8;
+  --accent: #2f6fed; --ok: #1a7f37; --warn: #b7791f; --bad: #cf222e;
+  --b24: #d97706; --b5: #2f6fed; --b6: #8250df;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --card: #171b21; --fg: #e6e9ee; --muted: #8b949e; --line: #2a303a;
+    --accent: #6b9bff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+    --b24: #f0a030; --b5: #6b9bff; --b6: #b392f0;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+header h1 { font-size: 16px; margin: 0; }
+.muted { color: var(--muted); }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); }
+.badge.demo { color: var(--warn); border-color: var(--warn); }
+main { padding: 16px; max-width: 1200px; margin: 0 auto; display: grid; gap: 16px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.radio .top { display: flex; justify-content: space-between; align-items: baseline; }
+.band { font-weight: 600; }
+.band.b24 { color: var(--b24); } .band.b5 { color: var(--b5); } .band.b6 { color: var(--b6); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-top: 6px; font-size: 13px; }
+.kv span:nth-child(odd) { color: var(--muted); }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 12px; color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+tr.sta { cursor: pointer; } tr.sta:hover { background: var(--bg); }
+tr.detail > td { background: var(--bg); white-space: normal; }
+.pill { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--accent); color: #fff; }
+.pill.mlo { background: var(--b6); }
+.sig-good { color: var(--ok); } .sig-mid { color: var(--warn); } .sig-bad { color: var(--bad); }
+canvas { width: 100%; height: 70px; display: block; }
+.links { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.err { color: var(--bad); margin: 0 0 4px; }
+pre { margin: 0; white-space: pre-wrap; font-size: 12px; }
+.hist { display: flex; align-items: flex-end; gap: 2px; height: 40px; }
+.hist i { flex: 1; background: var(--accent); min-height: 1px; border-radius: 1px 1px 0 0; }
+@media (max-width: 600px) { main { padding: 10px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>mt7996 Monitor</h1>
+  <span id="host" class="muted"></span>
+  <span id="demo" class="badge demo" hidden>demo data</span>
+  <span id="upd" class="muted"></span>
+</header>
+<main>
+  <div id="errors"></div>
+  <section><h2>Radios / links</h2><div id="radios" class="grid"></div></section>
+  <section class="card"><h2>Stations</h2><div class="scroll"><table id="stas"></table></div></section>
+  <section class="card"><h2>Hardware: TX per band</h2><div id="tx" class="grid"></div></section>
+  <section class="card"><h2>Hardware queues / TWT / DFS</h2><div id="misc"></div></section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (v, d = 1, u = "") => v == null ? "–" : (+v).toFixed(d).replace(/\.0+$/, "") + u;
+const bandCls = b => b === "2.4G" ? "b24" : b === "5G" ? "b5" : "b6";
+const sigCls = s => s == null ? "" : s >= -60 ? "sig-good" : s >= -72 ? "sig-mid" : "sig-bad";
+const open = new Set();   // expanded station MACs
+let hist = {};
+
+function rateStr(r) {
+  if (!r) return "–";
+  const p = r.proto ? "11" + r.proto + " " : "";
+  const bits = [r.mcs != null ? "MCS" + r.mcs : null, r.nss ? r.nss + "ss" : null, r.width ? r.width + "MHz" : null].filter(Boolean);
+  return esc(fmt(r.mbps, 0) + " Mb/s · " + p + bits.join(" "));
+}
+
+function spark(canvas, series, color) {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext("2d"); g.scale(dpr, dpr);
+  const cs = getComputedStyle(document.body);
+  g.strokeStyle = cs.getPropertyValue("--line"); g.beginPath(); g.moveTo(0, h - .5); g.lineTo(w, h - .5); g.stroke();
+  if (!series || series.length < 2) return;
+  const t0 = series[0][0], t1 = series[series.length - 1][0];
+  const vs = series.map(p => p[1]), lo = Math.min(...vs), hi = Math.max(...vs, lo + 1e-9);
+  g.strokeStyle = cs.getPropertyValue(color); g.lineWidth = 1.5; g.beginPath();
+  series.forEach(([t, v], i) => {
+    const x = (t - t0) / Math.max(1e-9, t1 - t0) * (w - 2) + 1, y = h - 4 - (v - lo) / (hi - lo) * (h - 10);
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  });
+  g.stroke();
+  g.fillStyle = cs.getPropertyValue("--muted"); g.font = "10px system-ui";
+  g.fillText(fmt(hi, 1), 2, 10); g.fillText(fmt(lo, 1), 2, h - 5);
+}
+
+function renderRadios(st) {
+  $("radios").innerHTML = st.radios.map(r => `
+    <div class="card radio">
+      <div class="top"><span><span class="band ${bandCls(r.band)}">${esc(r.band)}</span>
+        ch ${esc(r.channel)} · ${esc(r.width)} MHz</span>
+        <span class="muted">${esc(r.iface)}${r.link != null ? " · link " + esc(r.link) : ""}</span></div>
+      <div class="muted">${esc(r.freq)} MHz${r.ssid ? " · " + esc(r.ssid) : ""}</div>
+      <div class="kv">
+        <span>TX power</span><span>${fmt(r.txpower, 1, " dBm")}</span>
+        <span>Noise</span><span>${fmt(r.noise, 0, " dBm")}</span>
+        <span>Busy</span><span>${fmt(r.busy_pct, 1, " %")} <span class="muted">(tx ${fmt(r.tx_pct, 1)} / rx ${fmt(r.rx_pct, 1)})</span></span>
+        <span>Stations</span><span>${r.stations}</span>
+      </div>
+      <div class="bar"><i style="width:${Math.min(100, r.busy_pct || 0)}%"></i></div>
+      ${r.history_key ? `<canvas data-h="${esc(r.history_key)}" data-c="--${bandCls(r.band)}"></canvas>` : ""}
+    </div>`).join("") || '<div class="muted">no interfaces</div>';
+}
+
+function linkCard(s, l) {
+  const k = `sta:${s.mac}:l${l.id}`;
+  return `<div class="card">
+    <div><span class="band ${bandCls(l.band)}">${esc(l.band || "link")}</span> link ${l.id}
+      <span class="muted">${l.channel != null ? "ch " + esc(l.channel) : ""} ${esc(l.addr || "")}</span></div>
+    <div class="kv">
+      <span>Signal</span><span class="${sigCls(l.signal)}">${fmt(l.signal, 0, " dBm")}</span>
+      <span>TX</span><span>${fmt(l.mbps_tx, 1, " Mb/s")}</span>
+      <span>Retries</span><span>${fmt(l.retry_pct, 1, " %")}</span>
+      <span>Rate</span><span>${rateStr(l.tx_rate)}</span>
+    </div>
+    <canvas data-h="${esc(k + ":tx")}" data-c="--${bandCls(l.band)}"></canvas></div>`;
+}
+
+function renderStas(st) {
+  let h = `<tr><th>Station</th><th>Iface</th><th class="num">Signal</th><th class="num">TX Mb/s</th>
+    <th class="num">RX Mb/s</th><th class="num">Retry %</th><th>TX rate</th><th>Links</th></tr>`;
+  for (const s of st.stations) {
+    const exp = open.has(s.mac);
+    h += `<tr class="sta" data-mac="${esc(s.mac)}"><td>${exp ? "▾" : "▸"} ${esc(s.mac)}
+      ${s.mlo ? '<span class="pill mlo">MLO</span>' : ""}</td><td>${esc(s.iface)}</td>
+      <td class="num ${sigCls(s.signal)}">${fmt(s.signal, 0)}</td>
+      <td class="num">${fmt(s.mbps_tx, 1)}</td><td class="num">${fmt(s.mbps_rx, 1)}</td>
+      <td class="num">${fmt(s.retry_pct, 1)}</td><td>${rateStr(s.tx_rate)}</td>
+      <td>${s.links.map(l => `<span class="band ${bandCls(l.band)}">${esc(l.band || l.id)}</span>`).join(" ") || "–"}</td></tr>`;
+    if (exp) {
+      h += `<tr class="detail"><td colspan="8">
+        <div class="muted">connected ${fmt(s.connected_s, 0, " s")} · inactive ${fmt(s.inactive_ms, 0, " ms")}
+          · chains ${esc((s.chains || []).join(", ") || "–")} · ${s.authorized ? "authorized" : ""}</div>
+        <div class="links" style="margin-top:8px">
+          <div class="card"><div>total throughput</div>
+            <canvas data-h="sta:${esc(s.mac)}:tx" data-c="--accent"></canvas></div>
+          <div class="card"><div>signal</div>
+            <canvas data-h="sta:${esc(s.mac)}:sig" data-c="--accent"></canvas></div>
+          ${s.links.map(l => linkCard(s, l)).join("")}
+        </div></td></tr>`;
+    }
+  }
+  $("stas").innerHTML = st.stations.length ? h : '<tr><td class="muted">no stations associated</td></tr>';
+}
+
+function renderHw(st) {
+  const txs = st.hw.flatMap(h => h.tx.map(t => ({...t, dev: h.phy})));
+  $("tx").innerHTML = txs.map(t => {
+    const am = t.amsdu || [], tot = am.reduce((a, b) => a + b, 0) || 1;
+    return `<div class="card"><b>${esc(t.phy)}</b> <span class="muted">band ${t.band}</span>
+      <div class="kv"><span>Attempts</span><span>${esc(t.attempts)}</span>
+      <span>Success</span><span>${esc(t.success)}</span>
+      <span>PER</span><span>${fmt(t.per, 0, " %")}</span><span>BA miss</span><span>${esc(t.ba_miss)}</span></div>
+      <div class="bar"><i style="width:${Math.min(100, t.per || 0)}%;background:var(--bad)"></i></div>
+      <div class="muted" style="margin-top:6px">A-MSDU size histogram</div>
+      <div class="hist">${am.map((v, i) => `<i title="${i + 1} MSDU: ${v}" style="height:${Math.max(2, v / tot * 100)}%"></i>`).join("")}</div></div>`;
+  }).join("") || '<div class="muted">no tx_stats (debugfs unreadable?)</div>';
+
+  let m = "";
+  for (const h of st.hw) {
+    if (h.queues.length) m += `<h2>${esc(h.phy)} xmit queues</h2><div class="scroll"><table><tr><th>queue</th><th class="num">queued</th><th class="num">head</th><th class="num">tail</th></tr>` +
+      h.queues.map(q => `<tr><td>${esc(q.queue)}</td><td class="num">${q.queued}</td><td class="num">${q.head}</td><td class="num">${q.tail}</td></tr>`).join("") + "</table></div>";
+    if (h.twt.length) m += `<h2 style="margin-top:12px">TWT flows</h2><div class="scroll"><table><tr><th class="num">wcid</th><th class="num">id</th><th>flags</th><th class="num">exp</th><th class="num">mantissa</th><th class="num">duration</th></tr>` +
+      h.twt.map(t => `<tr><td class="num">${t.wcid}</td><td class="num">${t.id}</td><td>${esc(t.flags)}</td><td class="num">${t.exp}</td><td class="num">${t.mantissa}</td><td class="num">${t.duration}</td></tr>`).join("") + "</table></div>";
+    if (h.rdd) m += `<h2 style="margin-top:12px">DFS background radar (rdd_monitor)</h2><pre>${esc(h.rdd)}</pre>`;
+  }
+  $("misc").innerHTML = m || '<div class="muted">nothing to show</div>';
+}
+
+function drawSparks() {
+  document.querySelectorAll("canvas[data-h]").forEach(c => spark(c, hist[c.dataset.h], c.dataset.c));
+}
+
+async function tick() {
+  let next = 2000;
+  try {
+    const st = await (await fetch("/api/state", {cache: "no-store"})).json();
+    next = Math.max(500, (st.interval || 2) * 1000);
+    hist = await (await fetch("/api/history", {cache: "no-store"})).json();
+    $("host").textContent = st.host;
+    $("demo").hidden = !st.demo;
+    $("upd").textContent = st.ts ? "updated " + new Date(st.ts * 1000).toLocaleTimeString() : "";
+    $("errors").innerHTML = st.errors.map(e => `<p class="err">⚠ ${esc(e)}</p>`).join("");
+    renderRadios(st); renderStas(st); renderHw(st); drawSparks();
+  } catch (e) {
+    $("errors").innerHTML = `<p class="err">⚠ cannot reach daemon: ${esc(e.message)}</p>`;
+  }
+  setTimeout(tick, next);
+}
+
+$("stas").addEventListener("click", ev => {
+  const tr = ev.target.closest("tr.sta");
+  if (!tr) return;
+  const mac = tr.dataset.mac;
+  open.has(mac) ? open.delete(mac) : open.add(mac);
+  // re-render immediately from the last fetch
+  fetch("/api/state").then(r => r.json()).then(st => { renderStas(st); drawSparks(); });
+});
+addEventListener("resize", drawSparks);
+tick();
+</script>
+</body>
+</html>
