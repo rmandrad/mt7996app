@@ -84,7 +84,7 @@ survive a restart.
 
 Two tabs (the choice is kept in the URL: `#live` / `#history`):
 
-- **Live** - radios / links, the 10 min and 1 h traffic charts, stations (click a row for per-link graphs), channel
+- **Live** - radios / links (each box with its last 10 min of airtime as tx / rx / other bars), the 10 min and 1 h traffic charts, stations (click a row for per-link graphs), channel
   planner, airtime fairness, band steering, event log and the hardware panels. Updates every `--interval`.
 - **History** - the same traffic and channel-load charts over **6 h, 24 h, 7 days, 30 days or 1 year**.
 
@@ -94,7 +94,7 @@ Both tabs share the chart controls and behaviour:
   own scale. Group **by band** (2.4 / 5 / 6 GHz) or **by station** (the 7 busiest stations in the period, the rest
   folded into "Other"; a station keeps its colour while it stays in the top 7). Click a legend entry to hide a series.
   Below the charts: volume, average, 95th percentile and peak for the shown period, and a per-series table.
-- **Channel load**: airtime busy per link, split into this AP's TX, its RX and everything else (neighbours, noise).
+- **Channel load** (the radio boxes on Live; its own section on History): airtime busy per link, split into this AP's TX, its RX and everything else (neighbours, noise).
   The y axis scales to the busiest bar, so read the labels.
 - Hover (or focus a chart and use the arrow keys) for a tooltip with every series at that time. Dashed vertical lines
   mark channel changes and DFS events. Hatched areas mean no data was recorded (daemon not running, or not yet).

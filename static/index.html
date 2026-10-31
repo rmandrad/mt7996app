@@ -31,7 +31,8 @@ header h1 { font-size: 16px; margin: 0; }
 main { padding: 16px; max-width: 1200px; margin: 0 auto; display: grid; gap: 16px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.radio canvas.chart { margin-top: 8px; }
 .radio .top { display: flex; justify-content: space-between; align-items: baseline; }
 .band { font-weight: 600; }
 .band.b24 { color: var(--b24); } .band.b5 { color: var(--b5); } .band.b6 { color: var(--b6); }
@@ -178,9 +179,26 @@ function spark(canvas, series, color) {
   g.fillText(fmt(hi, 1), 2, 10); g.fillText(fmt(lo, 1), 2, h - 5);
 }
 
+const radioCards = [];   // {text, panel} per radio box, in state order
+let radioSig = "";
 function renderRadios(st) {
-  $("radios").innerHTML = st.radios.map(r => `
-    <div class="card radio">
+  const host = $("radios"), sig = st.radios.map(r => [r.iface, r.link, r.history_key].join("/")).join("|");
+  if (sig !== radioSig) {   // rebuild only when the set of links changes: the canvases keep their hover handlers
+    radioSig = sig; radioCards.length = 0; host.replaceChildren();
+    for (const r of st.radios) {
+      const card = document.createElement("div"), text = document.createElement("div");
+      card.className = "card radio"; card.append(text);
+      let panel = null;
+      if (r.history_key) {
+        const cv = utilCanvas(r); card.append(cv);
+        panel = utilPanel(cv, r.history_key.replace(/:busy$/, ""), () => [600, null]);
+      }
+      host.append(card); radioCards.push({text, panel});
+    }
+    if (!st.radios.length) host.innerHTML = '<div class="muted">no interfaces</div>';
+  }
+  st.radios.forEach((r, i) => {
+    radioCards[i].text.innerHTML = `
       <div class="top"><span><span class="band ${bandCls(r.band)}">${esc(r.band)}</span>
         ch ${esc(r.channel)} · ${esc(r.width)} MHz</span>
         <span class="muted">${esc(r.iface)}${r.link != null ? " · link " + esc(r.link) : ""}</span></div>
@@ -191,9 +209,9 @@ function renderRadios(st) {
         <span>Busy</span><span>${fmt(r.busy_pct, 1, " %")} <span class="muted">(tx ${fmt(r.tx_pct, 1)} / rx ${fmt(r.rx_pct, 1)})</span></span>
         <span>Stations</span><span>${r.stations}${r.stations_unlinked ? ` <span class="muted">(+${r.stations_unlinked} link unknown)</span>` : ""}</span>
       </div>
-      <div class="bar"><i style="width:${Math.min(100, r.busy_pct || 0)}%"></i></div>
-      ${r.history_key ? `<canvas data-h="${esc(r.history_key)}" data-c="--${bandCls(r.band)}"></canvas>` : ""}
-    </div>`).join("") || '<div class="muted">no interfaces</div>';
+      <div class="bar"><i style="width:${Math.min(100, r.busy_pct || 0)}%"></i></div>`;
+    radioCards[i].panel?.update();
+  });
 }
 
 function linkCard(s, l) {
@@ -460,11 +478,39 @@ function attach(o, move, leave) {
   });
 }
 
+/** Airtime busy of one link as stacked tx / rx / other bars. rng() -> [seconds, tier]; update() redraws. */
+function utilPanel(cv, key, rng) {
+  const o = {cv, key, hover: -1, xlabels: true, fmtY: fmtPct, colors: ["--s1", "--s3", "--other"]};
+  o.update = () => {
+    if (o.hover >= 0) return;   // frozen while the pointer is on it
+    const [secs, tier] = rng(), g = makeGrid(cv.clientWidth - 64, srvNow, secs, tier);
+    o.g = g; o.busy = bucket(points(key + ":busy", tier), g); o.tx = bucket(points(key + ":tx", tier), g); o.rx = bucket(points(key + ":rx", tier), g);
+    o.has = o.busy.map(v => !Number.isNaN(v));
+    o.stacks = i => [o.tx[i] || 0, o.rx[i] || 0, Math.max(0, o.busy[i] - (o.tx[i] || 0) - (o.rx[i] || 0))];
+    o.max = niceMax(Math.max(0, ...o.busy.filter(v => v >= 0)), 10);
+    drawPanel(o);
+  };
+  attach(o, (i, x, y) => {
+    o.hover = i; drawPanel(o);
+    const b = o.busy[i], tx = o.tx[i] || 0, rx = o.rx[i] || 0, other = Math.max(0, b - tx - rx);
+    showTip(colRange(o.g)(i), [""], Number.isNaN(b) ? [{name: "no data", vals: [""]}] : [
+      {color: "--s1", name: "TX", vals: [fmtPct(tx)]}, {color: "--s3", name: "RX", vals: [fmtPct(rx)]},
+      {color: "--other", name: "Other", vals: [fmtPct(other)]}, {name: "Busy", total: true, vals: [fmtPct(b)]}], [], x, y);
+  }, () => { if (o.hover < 0) return; o.hover = -1; hideTip(); o.update(); });
+  return o;
+}
+function utilCanvas(r) {
+  const cv = document.createElement("canvas");
+  cv.className = "chart sm"; cv.tabIndex = 0; cv.setAttribute("role", "img");
+  cv.setAttribute("aria-label", `Channel busy time of the ${r.band} link over time`);
+  return cv;
+}
+
 /**
  * One set of controls + traffic chart + channel-load charts inside `host`.
  * ranges: [[label, seconds, tier]], tier null = raw samples. `id` keys the remembered choice.
  */
-function ChartView(host, id, ranges, defRange) {
+function ChartView(host, id, ranges, defRange, opts = {}) {
   const ui = {range: defRange, group: "band"}, hidden = new Set(), slotOf = new Map();
   try {
     const u = JSON.parse(localStorage.getItem("mt7996ui:" + id) || "{}");
@@ -484,9 +530,9 @@ function ChartView(host, id, ranges, defRange) {
       <div class="scroll" data-r="stats"></div>
       <details style="margin-top:8px"><summary class="muted">Table view (per series)</summary><div class="scroll" data-r="table"></div></details>
     </section>
-    <section class="card"><h2>Channel load <span class="muted" style="text-transform:none">(airtime busy per link; y axis scales to the busiest bar)</span></h2>
+    ${opts.util === false ? "" : `<section class="card"><h2>Channel load <span class="muted" style="text-transform:none">(airtime busy per link; y axis scales to the busiest bar)</span></h2>
       <div class="legend static muted"><span><i class="sw" style="background:var(--s1)"></i>TX</span><span><i class="sw" style="background:var(--s3)"></i>RX</span><span><i class="sw" style="background:var(--other)"></i>other (neighbours, noise)</span></div>
-      <div class="grid" data-r="util" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))"></div></section>`;
+      <div class="grid" data-r="util"></div></section>`}`;
   const R = n => host.querySelector(`[data-r="${n}"]`);
   const range = () => ranges[ui.range], tier = () => range()[2];
   const tp = {down: {cv: R("down"), dir: "tx"}, up: {cv: R("up"), dir: "rx", xlabels: true}};
@@ -603,37 +649,21 @@ function ChartView(host, id, ranges, defRange) {
 
   // channel load: one stacked panel per radio link (tx / rx / other busy)
   function renderUtil() {
-    if (!lastSt) return;
-    const rs = lastSt.radios.filter(r => r.history_key), sig = rs.map(r => r.history_key).join("|"), uh = R("util");
+    const uh = R("util");
+    if (!uh || !lastSt) return;
+    const rs = lastSt.radios.filter(r => r.history_key), sig = rs.map(r => r.history_key).join("|");
     if (sig !== utilSig) {
       utilSig = sig; util.clear(); uh.replaceChildren();
       for (const r of rs) {
-        const card = document.createElement("div"), t = document.createElement("div"), cv = document.createElement("canvas");
-        card.className = "card"; cv.className = "chart sm"; cv.tabIndex = 0; cv.setAttribute("role", "img");
-        cv.setAttribute("aria-label", `Channel busy time of ${r.band} link over time`);
+        const card = document.createElement("div"), t = document.createElement("div"), cv = utilCanvas(r);
+        card.className = "card";
         t.innerHTML = `<span class="band ${bandCls(r.band)}">${esc(r.band)}</span> ch ${esc(r.channel)} · ${esc(r.width)} MHz <span class="muted">${esc(r.iface)}${r.link != null ? " · link " + esc(r.link) : ""}</span>`;
         card.append(t, cv); uh.append(card);
-        const o = {cv, key: r.history_key.replace(/:busy$/, ""), hover: -1, xlabels: true, fmtY: fmtPct, colors: ["--s1", "--s3", "--other"]};
-        attach(o, (i, x, y) => {
-          o.hover = i; drawPanel(o);
-          const b = o.busy[i], tx = o.tx[i] || 0, rx = o.rx[i] || 0, other = Math.max(0, b - tx - rx);
-          showTip(colRange(o.g)(i), [""], Number.isNaN(b) ? [{name: "no data", vals: [""]}] : [
-            {color: "--s1", name: "TX", vals: [fmtPct(tx)]}, {color: "--s3", name: "RX", vals: [fmtPct(rx)]},
-            {color: "--other", name: "Other", vals: [fmtPct(other)]}, {name: "Busy", total: true, vals: [fmtPct(b)]}], [], x, y);
-        }, () => { if (o.hover < 0) return; o.hover = -1; hideTip(); renderUtil(); });
-        util.set(r.history_key, o);
+        util.set(r.history_key, utilPanel(cv, r.history_key.replace(/:busy$/, ""), () => [range()[1], tier()]));
       }
       if (!rs.length) uh.innerHTML = '<div class="muted">no survey data</div>';
     }
-    for (const o of util.values()) {
-      if (o.hover >= 0) continue;   // frozen while the pointer is on it
-      const g = makeGrid(o.cv.clientWidth - 64, srvNow, range()[1], tier());
-      o.g = g; o.busy = bucket(points(o.key + ":busy", tier()), g); o.tx = bucket(points(o.key + ":tx", tier()), g); o.rx = bucket(points(o.key + ":rx", tier()), g);
-      o.has = o.busy.map(v => !Number.isNaN(v));
-      o.stacks = i => [o.tx[i] || 0, o.rx[i] || 0, Math.max(0, o.busy[i] - (o.tx[i] || 0) - (o.rx[i] || 0))];
-      o.max = niceMax(Math.max(0, ...o.busy.filter(v => v >= 0)), 10);
-      drawPanel(o);
-    }
+    for (const o of util.values()) o.update();
   }
 
   const need = () => { const out = []; for (let t = tier(); t; t = TIER[t].finer) out.push(t); return out; };
@@ -664,7 +694,8 @@ function ChartView(host, id, ranges, defRange) {
   return view;
 }
 
-const liveView = ChartView($("liveCharts"), "live", [["10 min", 600, null], ["1 h", 3600, "1m"]], 0);
+// the Live tab shows the airtime graphs inside the radio boxes instead of a separate section
+const liveView = ChartView($("liveCharts"), "live", [["10 min", 600, null], ["1 h", 3600, "1m"]], 0, {util: false});
 const histView = ChartView($("histCharts"), "history", [["6 h", 21600, "1m"], ["24 h", 86400, "1m"], ["7 days", 604800, "10m"], ["30 days", 2592000, "10m"], ["1 year", 31536000, "1h"]], 1);
 
 // ---- tabs
