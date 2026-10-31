@@ -2,6 +2,10 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
+use crate::airtime::AirtimeAdvice;
+use crate::planner::Plan;
+use crate::steering::SteerAdvice;
+
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
 pub struct Rate {
     pub raw: String,
@@ -41,6 +45,7 @@ pub struct Stats {
     pub mbps_tx: Option<f64>,
     pub mbps_rx: Option<f64>,
     pub retry_pct: Option<f64>,
+    pub snr: Option<i32>,
 }
 
 #[derive(Serialize, Clone, Default, Debug)]
@@ -148,9 +153,39 @@ pub struct Hw {
     pub dfs_hw_pattern: Option<String>,
 }
 
+/// One channel from `iw phy info`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChanInfo {
+    pub freq: u32,
+    pub channel: u32,
+    pub disabled: bool,
+    pub radar: bool,
+}
+
+/// One BSS from `iw dev X scan dump` (the kernel's scan cache).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bss {
+    pub bssid: String,
+    pub freq: u32,
+    pub signal: f64,
+    pub ssid: String,
+    pub seen_ms: Option<u64>,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct ScanData {
+    pub ts: f64,
+    pub per_iface: HashMap<String, Vec<Bss>>,
+}
+
 /// One undigested sample from a Source.
 #[derive(Default)]
 pub struct Raw {
+    /// refreshed only every few seconds/minutes; `None` = unchanged
+    pub scan: Option<ScanData>,
+    pub phy_chans: Option<HashMap<String, Vec<ChanInfo>>>,
+    /// selected `hostapd_cli status` keys per interface
+    pub hostapd: HashMap<String, BTreeMap<String, String>>,
     pub ifaces: Vec<Iface>,
     pub stations: Vec<Station>,
     pub survey: HashMap<String, Vec<SurveyChan>>,
@@ -166,6 +201,7 @@ pub trait Source: Send {
 #[derive(Serialize, Clone, Default, Debug)]
 pub struct Radio {
     pub iface: String,
+    pub phy: Option<String>,
     pub link: Option<u32>,
     pub ssid: Option<String>,
     pub kind: Option<String>,
@@ -196,4 +232,16 @@ pub struct State {
     pub radios: Vec<Radio>,
     pub stations: Vec<Station>,
     pub hw: Vec<Hw>,
+    pub plan: Option<Plan>,
+    pub airtime: Vec<AirtimeAdvice>,
+    pub steering: Vec<SteerAdvice>,
+    pub control: ControlInfo,
+}
+
+#[derive(Serialize, Clone, Default, Debug)]
+pub struct ControlInfo {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub airtime_auto: bool,
+    pub steer_auto: bool,
 }

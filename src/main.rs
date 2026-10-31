@@ -1,11 +1,22 @@
+mod airtime;
 mod collector;
+mod control;
 mod debugfs;
+mod events;
+mod hostapd;
 mod iwparse;
 mod model;
+mod nl80211;
+mod planner;
 mod server;
 mod sources;
+mod steering;
+mod util;
 
 use collector::Collector;
+use control::{Control, ControlCfg};
+use events::EventLog;
+use hostapd::HostapdCfg;
 use model::{Source, State};
 use sources::{DemoSource, RealSource};
 use std::time::Duration;
@@ -26,6 +37,18 @@ USAGE: mt7996app [OPTIONS]
   --debugfs PATH    debugfs ieee80211 root (default: /sys/kernel/debug/ieee80211)
   --once            sample twice, print a text summary and exit
   --json            with --once: print JSON instead
+  --no-netlink      do not read per-link statistics from nl80211 (iw only)
+  --no-kmsg         do not follow /dev/kmsg for DFS/firmware events
+  --hostapd-cli P   hostapd_cli binary (default: hostapd_cli); used for DFS state
+  --hostapd-ctrl D  hostapd control socket directory (hostapd_cli -p D)
+
+CONTROL (off by default; changes radio / client state - see README):
+  --allow-control          enable POST /api/control and the auto modes
+  --control-token-file F   file holding the shared token (>= 8 chars);
+                           or set MT7996APP_TOKEN. Required with --allow-control
+  --control-dry-run        log the commands instead of running them
+  --airtime-auto           lower the airtime weight of clients hogging airtime
+  --steer-auto             send BSS transition requests to single-link clients
   -h, --help / -V, --version
 
 ENVIRONMENT (overridden by command-line options):
@@ -44,6 +67,15 @@ struct Args {
     debugfs: String,
     once: bool,
     json: bool,
+    netlink: bool,
+    kmsg: bool,
+    hostapd_cli: String,
+    hostapd_ctrl: Option<String>,
+    allow_control: bool,
+    token_file: Option<String>,
+    dry_run: bool,
+    airtime_auto: bool,
+    steer_auto: bool,
 }
 
 /// Parse `ADDR:PORT`, `[V6]:PORT`, `:PORT` or a bare `PORT` into (bind, port).
@@ -73,6 +105,15 @@ fn parse_args() -> Result<Args, String> {
         debugfs: debugfs::DEFAULT_ROOT.into(),
         once: false,
         json: false,
+        netlink: true,
+        kmsg: true,
+        hostapd_cli: "hostapd_cli".into(),
+        hostapd_ctrl: None,
+        allow_control: false,
+        token_file: None,
+        dry_run: false,
+        airtime_auto: false,
+        steer_auto: false,
     };
     // Environment first, so command-line options override it.
     if let Ok(v) = std::env::var("MT7996APP_LISTEN") {
@@ -101,6 +142,15 @@ fn parse_args() -> Result<Args, String> {
             "--debugfs" => a.debugfs = val("--debugfs")?,
             "--demo" => a.demo = true,
             "--any-driver" => a.any_driver = true,
+            "--no-netlink" => a.netlink = false,
+            "--no-kmsg" => a.kmsg = false,
+            "--hostapd-cli" => a.hostapd_cli = val("--hostapd-cli")?,
+            "--hostapd-ctrl" => a.hostapd_ctrl = Some(val("--hostapd-ctrl")?),
+            "--allow-control" => a.allow_control = true,
+            "--control-token-file" => a.token_file = Some(val("--control-token-file")?),
+            "--control-dry-run" => a.dry_run = true,
+            "--airtime-auto" => a.airtime_auto = true,
+            "--steer-auto" => a.steer_auto = true,
             "--once" => a.once = true,
             "--json" => a.json = true,
             "-h" | "--help" => {
@@ -114,7 +164,23 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown option {other} (see --help)")),
         }
     }
+    if (a.airtime_auto || a.steer_auto || a.dry_run) && !a.allow_control {
+        return Err("--airtime-auto, --steer-auto and --control-dry-run need --allow-control".into());
+    }
     Ok(a)
+}
+
+/// Token from `--control-token-file` or `MT7996APP_TOKEN`.
+fn load_token(a: &Args) -> Result<String, String> {
+    let t = match &a.token_file {
+        Some(f) => std::fs::read_to_string(f).map_err(|e| format!("cannot read token file {f}: {e}"))?,
+        None => std::env::var("MT7996APP_TOKEN").map_err(|_| "--allow-control needs --control-token-file FILE or MT7996APP_TOKEN".to_string())?,
+    };
+    let t = t.trim().to_string();
+    if t.len() < 8 {
+        return Err("the control token must be at least 8 characters".into());
+    }
+    Ok(t)
 }
 
 fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
@@ -191,12 +257,41 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let hostapd = Some(HostapdCfg { cli: a.hostapd_cli.clone(), ctrl: a.hostapd_ctrl.clone() });
     let src: Box<dyn Source> = if a.demo {
         Box::new(DemoSource::new())
     } else {
-        Box::new(RealSource::new(a.iw.clone(), a.debugfs.clone(), a.any_driver))
+        Box::new(RealSource::new(a.iw.clone(), a.debugfs.clone(), a.any_driver, a.netlink, hostapd))
     };
-    let col = Collector::new(src, a.interval);
+    let log = EventLog::new();
+    let token = if a.allow_control {
+        match load_token(&a) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("mt7996app: {e}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        String::new()
+    };
+    let ctl = Control::new(
+        ControlCfg {
+            enabled: a.allow_control,
+            dry_run: a.dry_run,
+            token,
+            iw: a.iw.clone(),
+            hostapd_cli: a.hostapd_cli.clone(),
+            hostapd_ctrl: a.hostapd_ctrl.clone(),
+            airtime_auto: a.airtime_auto,
+            steer_auto: a.steer_auto,
+        },
+        log.clone(),
+    );
+    if a.kmsg && !a.demo && !a.once {
+        events::spawn_kmsg(log.clone());
+    }
+    let col = Collector::new(src, a.interval, ctl, log.clone());
 
     if a.once {
         col.poll_once();
@@ -211,7 +306,7 @@ fn main() {
     }
 
     col.start();
-    if let Err(e) = server::serve(col, &a.bind, a.port, a.demo) {
+    if let Err(e) = server::serve(col, log, &a.bind, a.port, a.demo) {
         eprintln!("mt7996app: {e}");
         std::process::exit(1);
     }

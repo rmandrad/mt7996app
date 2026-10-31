@@ -53,6 +53,24 @@ canvas { width: 100%; height: 70px; display: block; }
 pre { margin: 0; white-space: pre-wrap; font-size: 12px; }
 .hist { display: flex; align-items: flex-end; gap: 2px; height: 40px; }
 .hist i { flex: 1; background: var(--accent); min-height: 1px; border-radius: 1px 1px 0 0; }
+.bins { display: flex; align-items: flex-end; gap: 2px; height: 46px; margin: 8px 0 4px; }
+.bins i { flex: 1; min-width: 6px; background: var(--ok); opacity: .55; border-radius: 2px 2px 0 0; position: relative; }
+.bins i.busy { background: var(--bad); opacity: .85; }
+.bins i.prim { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bins i.punct { background: repeating-linear-gradient(45deg, var(--muted) 0 3px, transparent 3px 6px); opacity: .9; }
+.row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+button { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 6px; border: 1px solid var(--accent);
+  background: transparent; color: var(--accent); cursor: pointer; }
+button:hover { background: var(--accent); color: #fff; }
+button.warn { border-color: var(--warn); color: var(--warn); } button.warn:hover { background: var(--warn); color: #fff; }
+.ev { font-size: 12px; max-height: 260px; overflow-y: auto; }
+.ev div { padding: 2px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+.ev .t { color: var(--muted); white-space: nowrap; } .ev .k { min-width: 64px; color: var(--muted); }
+.ev .warn { color: var(--warn); } .ev .error { color: var(--bad); }
+.ctl { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--warn); color: var(--warn); font-size: 12px; }
+#toast { position: fixed; right: 12px; bottom: 12px; max-width: 420px; padding: 8px 12px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--line); box-shadow: 0 2px 10px #0004; font-size: 12px; white-space: pre-wrap; }
+#toast.bad { border-color: var(--bad); }
 @media (max-width: 600px) { main { padding: 10px; } }
 </style>
 </head>
@@ -62,11 +80,18 @@ pre { margin: 0; white-space: pre-wrap; font-size: 12px; }
   <span id="host" class="muted"></span>
   <span id="demo" class="badge demo" hidden>demo data</span>
   <span id="upd" class="muted"></span>
+  <span id="ctl" class="ctl" hidden></span>
 </header>
 <main>
   <div id="errors"></div>
+  <div id="toast" hidden></div>
   <section><h2>Radios / links</h2><div id="radios" class="grid"></div></section>
   <section class="card"><h2>Stations</h2><div class="scroll"><table id="stas"></table></div></section>
+  <section class="card"><h2>Channel planner / puncturing <span class="muted" style="text-transform:none">(advice from the scan cache)</span></h2>
+    <div id="plan"></div></section>
+  <section class="card"><h2>Airtime fairness</h2><div class="scroll"><table id="air"></table></div></section>
+  <section class="card"><h2>Band steering (single-link clients)</h2><div class="scroll"><table id="steer"></table></div></section>
+  <section class="card"><h2>Events (DFS, firmware, channel changes, joins, control audit)</h2><div id="events" class="ev"></div></section>
   <section class="card"><h2>Hardware: TX per band</h2><div id="tx" class="grid"></div></section>
   <section class="card"><h2>Hardware queues / TWT / DFS</h2><div id="misc"></div></section>
 </main>
@@ -130,7 +155,7 @@ function linkCard(s, l) {
     <div><span class="band ${bandCls(l.band)}">${esc(l.band || "link")}</span> link ${l.id}
       <span class="muted">${l.channel != null ? "ch " + esc(l.channel) : ""} ${esc(l.addr || "")}</span></div>
     <div class="kv">
-      <span>Signal</span><span class="${sigCls(l.signal)}">${fmt(l.signal, 0, " dBm")}</span>
+      <span>Signal</span><span class="${sigCls(l.signal)}">${fmt(l.signal, 0, " dBm")} <span class="muted">(SNR ${fmt(l.snr, 0, " dB")})</span></span>
       <span>TX</span><span>${fmt(l.mbps_tx, 1, " Mb/s")}</span>
       <span>Retries</span><span>${fmt(l.retry_pct, 1, " %")}</span>
       <span>Rate</span><span>${rateStr(l.tx_rate)}</span>
@@ -139,18 +164,18 @@ function linkCard(s, l) {
 }
 
 function renderStas(st) {
-  let h = `<tr><th>Station</th><th>Iface</th><th class="num">Signal</th><th class="num">TX Mb/s</th>
+  let h = `<tr><th>Station</th><th>Iface</th><th class="num">Signal</th><th class="num">SNR</th><th class="num">TX Mb/s</th>
     <th class="num">RX Mb/s</th><th class="num">Retry %</th><th>TX rate</th><th>Links</th></tr>`;
   for (const s of st.stations) {
     const exp = open.has(s.mac);
     h += `<tr class="sta" data-mac="${esc(s.mac)}"><td>${exp ? "▾" : "▸"} ${esc(s.mac)}
       ${s.mlo ? '<span class="pill mlo">MLO</span>' : ""}</td><td>${esc(s.iface)}</td>
-      <td class="num ${sigCls(s.signal)}">${fmt(s.signal, 0)}</td>
+      <td class="num ${sigCls(s.signal)}">${fmt(s.signal, 0)}</td><td class="num">${fmt(s.snr, 0)}</td>
       <td class="num">${fmt(s.mbps_tx, 1)}</td><td class="num">${fmt(s.mbps_rx, 1)}</td>
       <td class="num">${fmt(s.retry_pct, 1)}</td><td>${rateStr(s.tx_rate)}</td>
       <td>${s.links.map(l => `<span class="band ${bandCls(l.band)}">${esc(l.band || l.id)}</span>`).join(" ") || "–"}</td></tr>`;
     if (exp) {
-      h += `<tr class="detail"><td colspan="8">
+      h += `<tr class="detail"><td colspan="9">
         <div class="muted">connected ${fmt(s.connected_s, 0, " s")} · inactive ${fmt(s.inactive_ms, 0, " ms")}
           · chains ${esc((s.chains || []).join(", ") || "–")}${s.airtime_weight ? " · airtime weight " + s.airtime_weight : ""} · ${s.authorized ? "authorized" : ""}</div>
         <div class="links" style="margin-top:8px">
@@ -158,6 +183,8 @@ function renderStas(st) {
             <canvas data-h="sta:${esc(s.mac)}:tx" data-c="--accent"></canvas></div>
           <div class="card"><div>signal</div>
             <canvas data-h="sta:${esc(s.mac)}:sig" data-c="--accent"></canvas></div>
+          <div class="card"><div>SNR (dB)</div>
+            <canvas data-h="sta:${esc(s.mac)}:snr" data-c="--accent"></canvas></div>
           ${s.links.map(l => linkCard(s, l)).join("")}
         </div></td></tr>`;
     }
@@ -193,6 +220,109 @@ function drawSparks() {
   document.querySelectorAll("canvas[data-h]").forEach(c => spark(c, hist[c.dataset.h], c.dataset.c));
 }
 
+
+// ------------------------------------------------------------ control ----
+let ctlInfo = {enabled: false, dry_run: false};
+const toast = (msg, bad) => {
+  const t = $("toast"); t.textContent = msg; t.className = bad ? "bad" : ""; t.hidden = false;
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 9000);
+};
+function token() {
+  let t = ""; try { t = sessionStorage.getItem("mt7996tok") || ""; } catch (e) {}
+  if (!t) { t = prompt("Control token (as in --control-token-file):") || ""; try { sessionStorage.setItem("mt7996tok", t); } catch (e) {} }
+  return t;
+}
+async function control(action, confirmText) {
+  if (!confirm((confirmText || "Run this action?") + "\n\n" + JSON.stringify(action) + (ctlInfo.dry_run ? "\n\n(dry-run: nothing will be changed)" : ""))) return;
+  const r = await fetch("/api/control", {method: "POST", headers: {"X-Token": token(), "Content-Type": "application/json"}, body: JSON.stringify(action)});
+  const j = await r.json().catch(() => ({ok: false, error: "bad response"}));
+  if (r.status === 401) { try { sessionStorage.removeItem("mt7996tok"); } catch (e) {} }
+  toast(j.ok ? (j.output || "ok") : "failed: " + j.error, !j.ok);
+}
+const btn = (label, action, confirmText, cls) => ctlInfo.enabled
+  ? `<button class="${cls || ""}" data-act="${esc(JSON.stringify(action))}" data-confirm="${esc(confirmText || "")}">${esc(label)}${ctlInfo.dry_run ? " (dry-run)" : ""}</button>` : "";
+document.addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-act]");
+  if (b) control(JSON.parse(b.dataset.act), b.dataset.confirm);
+});
+
+// ------------------------------------------------------------- planner ----
+function renderPlan(st) {
+  const p = st.plan;
+  if (!p) { $("plan").innerHTML = '<div class="muted">no plan yet</div>'; return; }
+  const ifaces = [...new Set(st.radios.map(r => r.iface))];
+  let h = `<div class="row muted">${p.scan_age_s != null ? "scan cache age " + fmt(p.scan_age_s, 0, " s") : "no scan data"}
+    ${ifaces.map(i => btn("Trigger scan on " + i, {action: "scan", iface: i}, "Triggering a scan makes the AP leave its channel briefly and may disturb clients.", "warn")).join(" ")}</div>
+    ${p.notes.map(n => `<p class="muted">• ${esc(n)}</p>`).join("")}<div class="grid" style="margin-top:8px">`;
+  for (const l of p.links) {
+    const pun = l.puncture ? l.puncture.bitmap : 0;
+    const strip = l.bins.map((b, i) => `<i class="${b.busy ? "busy" : ""} ${b.primary ? "prim" : ""} ${pun & (1 << i) ? "punct" : ""}"
+      style="height:${Math.max(8, Math.min(100, 12 + b.load * 40))}%"
+      title="${b.freq} MHz · ${b.neighbors} neighbor(s)${b.strongest != null ? " · strongest " + fmt(b.strongest, 0) + " dBm" : ""}${b.primary ? " · primary" : ""}${pun & (1 << i) ? " · punctured" : ""}"></i>`).join("");
+    h += `<div class="card"><div><span class="band ${bandCls(l.band)}">${esc(l.band)}</span> ch ${esc(l.channel)} · ${l.width} MHz
+      <span class="muted">${esc(l.iface)}${l.link != null ? " · link " + l.link : ""}</span></div>
+      <div class="bins">${strip}</div>
+      <div class="muted">20 MHz subchannels (red = neighbor heard ≥ −82 dBm, outlined = primary, hatched = recommended puncture)</div>
+      <div class="kv"><span>Usable now</span><span>${l.clear_mhz} MHz of ${l.width}</span><span>Interference</span><span>${fmt(l.current_score, 2)}</span></div>`;
+    if (l.puncture) {
+      const a = {action: "chan_switch", iface: l.iface, link: l.link, freq: l.freq, center1: l.center1, bandwidth: l.width, punct: l.puncture.bitmap};
+      h += `<p><b>Puncture ${esc(l.puncture.bitmap_hex)}</b> (${l.puncture.punctured_freqs.join(", ")} MHz): ${l.puncture.clear_before_mhz} → ${l.puncture.clear_after_mhz} MHz usable (+${l.puncture.gain_mhz})
+        ${btn("Apply puncturing", a, "Switches this link with hostapd chan_switch; clients may briefly disconnect.", "warn")}</p>`;
+    } else if (l.puncture_note) h += `<p class="muted">Puncturing: ${esc(l.puncture_note)}</p>`;
+    if (l.recommend) {
+      const c = l.recommend;
+      const a = {action: "chan_switch", iface: l.iface, link: l.link, freq: c.freq, center1: c.center1, bandwidth: c.width};
+      h += `<p><b>Move to ch ${esc(c.channel)} (${c.freq} MHz)</b>: interference ${fmt(c.score, 2)} vs ${fmt(l.current_score, 2)} now — ${esc(c.reason)}
+        ${btn("Apply channel", a, "Switches channel with hostapd chan_switch; clients may briefly disconnect.", "warn")}</p>`;
+    } else h += `<p class="muted">Current channel is among the best for this width.</p>`;
+    if (l.candidates.length) h += `<details><summary class="muted">candidates</summary><table><tr><th>ch</th><th class="num">score</th><th>notes</th></tr>` +
+      l.candidates.map(c => `<tr><td>${esc(c.channel ?? c.freq)}${c.current ? " (now)" : ""}</td><td class="num">${fmt(c.score, 2)}</td><td>${esc(c.reason)}</td></tr>`).join("") + `</table></details>`;
+    h += "</div>";
+  }
+  $("plan").innerHTML = h + "</div>";
+}
+
+// ------------------------------------------------------------- airtime ----
+function renderAirtime(st) {
+  if (!st.airtime.length) { $("air").innerHTML = '<tr><td class="muted">collecting airtime data (needs two samples and iw "tx/rx duration")</td></tr>'; return; }
+  let h = `<tr><th>Station</th><th class="num">Airtime %</th><th class="num">Mb/s</th><th class="num">Mb/s per %</th><th class="num">Weight</th><th>Status</th><th></th></tr>`;
+  for (const a of st.airtime) {
+    const act = a.hog && a.weight !== a.suggested ? btn("Throttle to " + a.suggested, {action: "set_airtime", iface: a.iface, mac: a.mac, weight: a.suggested}, "Lower this client's airtime weight.", "warn")
+      : (a.weight != null && a.weight !== 256 ? btn("Restore 256", {action: "set_airtime", iface: a.iface, mac: a.mac, weight: 256}, "Restore the default airtime weight.") : "");
+    h += `<tr><td>${esc(a.mac)}</td><td class="num">${fmt(a.share_pct, 1)}</td><td class="num">${fmt(a.mbps, 1)}</td><td class="num">${fmt(a.efficiency, 2)}</td>
+      <td class="num">${a.weight ?? "–"}</td><td class="${a.hog ? "sig-bad" : ""}">${a.hog ? "hogging: " : ""}${esc(a.reason)}${a.throttled ? " (throttled)" : ""}</td><td>${act}</td></tr>`;
+  }
+  $("air").innerHTML = h;
+}
+
+// ------------------------------------------------------------ steering ----
+function renderSteer(st) {
+  if (!st.steering.length) { $("steer").innerHTML = '<tr><td class="muted">no steering candidates (single-link clients on a congested link with a quiet higher band)</td></tr>'; return; }
+  let h = `<tr><th>Station</th><th>Move</th><th>Why</th><th>Confidence</th><th></th></tr>`;
+  for (const a of st.steering) {
+    const act = btn("Send BTM request", {action: "btm", iface: a.iface, mac: a.mac, neighbor: a.neighbor}, "Ask this client to roam; it may ignore or accept.", "warn");
+    h += `<tr><td>${esc(a.mac)}</td><td><span class="band ${bandCls(a.from_band)}">${esc(a.from_band)}</span> → <span class="band ${bandCls(a.to_band)}">${esc(a.to_band)}</span></td>
+      <td style="white-space:normal">${esc(a.reason)}</td><td>${esc(a.confidence)}</td>
+      <td>${a.cooldown_left_s > 0 ? "cooldown " + a.cooldown_left_s + " s" : act}</td></tr>`;
+  }
+  $("steer").innerHTML = h;
+}
+
+// -------------------------------------------------------------- events ----
+let events = [], lastEv = 0;
+async function pollEvents() {
+  const j = await (await fetch("/api/events?since=" + lastEv, {cache: "no-store"})).json();
+  if (j.length) { lastEv = j[j.length - 1].id; events = events.concat(j).slice(-300); }
+  $("events").innerHTML = events.slice().reverse().map(e => `<div><span class="t">${new Date(e.ts * 1000).toLocaleTimeString()}</span>
+    <span class="k">${esc(e.kind)}</span><span class="${esc(e.level)}">${esc(e.msg)}</span></div>`).join("") || '<span class="muted">no events yet</span>';
+}
+
+function renderCtl(st) {
+  ctlInfo = st.control || {enabled: false};
+  const c = $("ctl"); c.hidden = !ctlInfo.enabled;
+  c.textContent = "control enabled" + (ctlInfo.dry_run ? " · dry-run" : "") + (ctlInfo.airtime_auto ? " · airtime auto" : "") + (ctlInfo.steer_auto ? " · steering auto" : "");
+}
+
 async function tick() {
   let next = 2000;
   try {
@@ -203,7 +333,9 @@ async function tick() {
     $("demo").hidden = !st.demo;
     $("upd").textContent = st.ts ? "updated " + new Date(st.ts * 1000).toLocaleTimeString() : "";
     $("errors").innerHTML = st.errors.map(e => `<p class="err">⚠ ${esc(e)}</p>`).join("");
-    renderRadios(st); renderStas(st); renderHw(st); drawSparks();
+    renderCtl(st); renderRadios(st); renderStas(st); renderPlan(st); renderAirtime(st); renderSteer(st); renderHw(st);
+    await pollEvents().catch(() => {});
+    drawSparks();
   } catch (e) {
     $("errors").innerHTML = `<p class="err">⚠ cannot reach daemon: ${esc(e.message)}</p>`;
   }

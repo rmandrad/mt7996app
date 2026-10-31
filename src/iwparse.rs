@@ -273,6 +273,46 @@ pub fn parse_survey(text: &str) -> Vec<SurveyChan> {
     out
 }
 
+/// Parse `iw phy X info` into the list of channels (all bands).
+pub fn parse_phy_channels(text: &str) -> Vec<ChanInfo> {
+    let mut out = vec![];
+    for line in text.lines() {
+        if let Some(c) = re!(r"^\s*\* (\d+(?:\.\d+)?) MHz \[(\d+)\]").captures(line) {
+            out.push(ChanInfo {
+                freq: fnum(&c[1]).unwrap_or(0),
+                channel: c[2].parse().unwrap_or(0),
+                disabled: line.contains("(disabled)"),
+                radar: line.contains("radar detection"),
+            });
+        }
+    }
+    out
+}
+
+/// Parse `iw dev X scan dump`.
+pub fn parse_scan_dump(text: &str) -> Vec<Bss> {
+    let mut out: Vec<Bss> = vec![];
+    for line in text.lines() {
+        if let Some(c) = re!(r"^BSS ([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})").captures(line) {
+            out.push(Bss { bssid: c[1].to_lowercase(), freq: 0, signal: -100.0, ssid: String::new(), seen_ms: None });
+            continue;
+        }
+        let Some(cur) = out.last_mut() else { continue };
+        let t = line.trim();
+        if let Some(v) = t.strip_prefix("freq:") {
+            cur.freq = fnum(v.trim()).unwrap_or(0);
+        } else if let Some(v) = t.strip_prefix("signal:") {
+            cur.signal = v.trim().split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(-100.0);
+        } else if let Some(v) = t.strip_prefix("SSID:") {
+            cur.ssid = v.trim().to_string();
+        } else if let Some(c) = re!(r"^last seen: (\d+) ms ago").captures(t) {
+            cur.seen_ms = c[1].parse().ok();
+        }
+    }
+    out.retain(|b| b.freq != 0);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +423,21 @@ mod tests {
         assert!(v[0].in_use && !v[1].in_use);
         assert_eq!((v[0].noise, v[0].busy_ms, v[0].active_ms), (Some(-95), Some(200), Some(1000)));
         assert_eq!(v[1].noise, Some(-96));
+    }
+
+    #[test]
+    fn phy_channels_and_scan() {
+        let t = "Wiphy phy0\n\tBand 2:\n\t\tFrequencies:\n\t\t\t* 5180.0 MHz [36] (23.0 dBm)\n\t\t\t* 5260 MHz [52] (23.0 dBm) (radar detection)\n\t\t\t* 5500 MHz [100] (disabled)\n\tBand 4:\n\t\t\t* 5955.0 MHz [1] (26.0 dBm)\n";
+        let c = parse_phy_channels(t);
+        assert_eq!(c.len(), 4);
+        assert_eq!((c[0].freq, c[0].channel, c[0].disabled, c[0].radar), (5180, 36, false, false));
+        assert!(c[1].radar && !c[1].disabled);
+        assert!(c[2].disabled);
+        assert_eq!((c[3].freq, c[3].channel), (5955, 1));
+        let s = "BSS aa:bb:cc:dd:ee:01(on wlan0) -- associated\n\tTSF: 1 usec\n\tfreq: 5500.0\n\tsignal: -63.00 dBm\n\tlast seen: 120 ms ago\n\tSSID: neighbor\nBSS AA:BB:CC:DD:EE:02(on wlan0)\n\tfreq: 2437\n\tsignal: -80.00 dBm\n\tSSID: \nBSS aa:bb:cc:dd:ee:03(on wlan0)\n\tsignal: -50.00 dBm\n";
+        let b = parse_scan_dump(s);
+        assert_eq!(b.len(), 2); // the entry without a freq is dropped
+        assert_eq!((b[0].freq, b[0].signal, b[0].ssid.as_str(), b[0].seen_ms), (5500, -63.0, "neighbor", Some(120)));
+        assert_eq!((b[1].bssid.as_str(), b[1].freq), ("aa:bb:cc:dd:ee:02", 2437));
     }
 }

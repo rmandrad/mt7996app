@@ -1,17 +1,36 @@
 # mt7996app
 
-A small, dependency-light daemon plus web dashboard for **MediaTek mt7996 (Wi-Fi 7) access points**
-such as the Banana Pi BPI-R4. It shows what MLO (multi-link operation) is actually doing:
+A small daemon plus web dashboard for **MediaTek mt7996 (Wi-Fi 7) access points** such as the Banana Pi BPI-R4.
+It shows what MLO (multi-link operation) is actually doing and helps you tune the radios.
 
-- **Radios / links** – channel, width, TX power, noise floor and airtime busy/tx/rx % per link (2.4 / 5 / 6 GHz).
-- **Stations** – signal, throughput, retry ratio and rates per client; MLO clients expand into a per-link breakdown with history graphs.
-- **Hardware counters** (mt76 debugfs) – TX attempts / success / PER, BA misses, A-MSDU histogram, xmit queues, TWT flows, DFS background-radar state.
+**Monitoring (read-only)**
 
-It is **read-only**: it never changes radio configuration. Written in Rust (std + `serde`, `regex`, `tiny_http`); the
-web UI is a single embedded HTML file with no external assets.
+- **Radios / links** - channel, width, TX power, noise floor and airtime busy/tx/rx % per link (2.4 / 5 / 6 GHz).
+- **Stations** - signal, **SNR**, throughput, retry ratio and rates; MLO clients expand into a per-link breakdown with
+  history graphs. Per-link numbers come straight from nl80211 (the kernel's `NL80211_ATTR_MLO_LINKS`), because `iw`
+  prints an MLO client as one aggregated record.
+- **Hardware counters** (mt76 debugfs) - TX attempts / success / PER, BA misses, A-MSDU histogram, xmit queues, TWT flows, DFS background-radar state.
+- **Event log** - channel changes, stations and MLO links joining/leaving, hostapd DFS/CAC state changes, and DFS /
+  radar / firmware / mt76 lines from the kernel log.
 
-> Status: version 0.1. Parsers are unit-tested against sample `iw` / debugfs output and the whole pipeline runs in
-> `--demo` mode, but it has **not yet been run against real mt7996 hardware**. See [Known limitations](#known-limitations).
+**Advice (computed, never applied on its own)**
+
+- **Channel and puncturing planner** - scores the neighbour BSSes of the kernel's scan cache per 20 MHz subchannel,
+  recommends a channel, and recommends an EHT **preamble-puncturing** pattern when a busy secondary subchannel would
+  otherwise cut the usable bandwidth. Patterns are checked against the same tables as the kernel (`net/wireless/chan.c`).
+- **Airtime fairness** - spots clients that use most of the airtime while moving little data and suggests a lower
+  airtime weight.
+- **Band steering** - suggests 802.11v BSS-transition requests for *single-link* clients on a congested link when a
+  higher band is quiet. MLO clients are never touched.
+
+**Control (off by default)** - with `--allow-control` and a token, the UI can apply the advice (airtime weight,
+`chan_switch` incl. puncturing, BSS transition request, scan). See [Control](#control-changing-radio-state).
+
+Written in Rust (`serde`, `regex`, `tiny_http`, `libc`); the web UI is a single embedded HTML file with no external assets.
+
+> Status: version 0.2. Verified on a BPI-R4 with a 2-link MLD AP: `iw dev`/`station dump` parsing, survey, debugfs
+> panels. **Not yet verified on hardware**: the nl80211 per-link reader for a real MLO client, the planner, and every
+> control action (they are unit-tested and exercised in `--demo` mode). See [Known limitations](#known-limitations).
 
 ## How it works
 
@@ -21,7 +40,12 @@ Every `--interval` seconds (default 2 s) the collector reads:
 |---|---|
 | `iw dev` | interfaces, channels, widths, TX power, per-link info of MLD interfaces |
 | `iw dev <if> station dump` | per-station and per-link counters, signal, rates |
+| nl80211 (generic netlink, `NL80211_CMD_GET_STATION`) | per-link statistics of MLO clients (signal, bytes, rates, retries, airtime) |
 | `iw dev <if> survey dump` | noise floor, channel busy/tx/rx airtime |
+| `iw dev <if> scan dump` | neighbouring BSSes for the planner (the kernel's scan **cache**, no scan is triggered) |
+| `iw phy <phy> info` | usable channels, DFS (radar) flags |
+| `hostapd_cli status` (optional) | DFS / CAC state |
+| `/dev/kmsg` (optional, root) | DFS, radar, firmware and mt76 messages for the event log |
 | `/sys/kernel/debug/ieee80211/phyN/mt76/*` | `tx_stats`, `xmit-queues`, `twt_stats`, `rdd_monitor`, ... |
 | `/sys/kernel/debug/ieee80211/phyN/netdev:IF/stations/MAC/link-N/` | per-link addresses of MLO stations |
 
@@ -177,6 +201,15 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 --iw PATH         path to the iw binary
 --debugfs PATH    debugfs ieee80211 root (default /sys/kernel/debug/ieee80211)
 --once [--json]   sample twice, print a summary (or JSON) and exit
+--no-netlink      do not read per-link statistics from nl80211 (iw only)
+--no-kmsg         do not follow /dev/kmsg
+--hostapd-cli P   hostapd_cli binary; --hostapd-ctrl DIR passes -p DIR (control socket directory)
+
+--allow-control          enable POST /api/control and the auto modes (see below)
+--control-token-file F   file with the shared token (>= 8 chars), or env MT7996APP_TOKEN
+--control-dry-run        log the commands instead of running them
+--airtime-auto           lower the airtime weight of clients hogging airtime
+--steer-auto             send BSS transition requests to single-link clients
 ```
 
 ## HTTP API
@@ -184,33 +217,79 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 | Endpoint | Description |
 |---|---|
 | `GET /` | the dashboard |
-| `GET /api/state` | latest sample: `radios`, `stations` (with `links`), `hw`, `errors` |
-| `GET /api/history` | time series `{ key: [[ts, value], ...] }`, e.g. `sta:<mac>:l2:tx`, `chan:wlan0:5180:busy` |
+| `GET /api/state` | latest sample: `radios`, `stations` (with `links`), `hw`, `plan`, `airtime`, `steering`, `control`, `errors` |
+| `GET /api/history` | time series `{ key: [[ts, value], ...] }`, e.g. `sta:<mac>:l2:tx`, `sta:<mac>:snr`, `chan:wlan0:5180:busy` |
+| `GET /api/events?since=ID` | event log, oldest first; pass the last seen `id` to read incrementally |
+| `POST /api/control` | JSON action with header `X-Token`; only with `--allow-control` |
+
+## Control: changing radio state
+
+Everything above is read-only unless you start the daemon with `--allow-control`. Then:
+
+```sh
+head -c 24 /dev/urandom | base64 > /etc/mt7996app.token && chmod 600 /etc/mt7996app.token
+mt7996app --listen 127.0.0.1:8996 --allow-control --control-token-file /etc/mt7996app.token --control-dry-run
+```
+
+**Try it with `--control-dry-run` first**: every command is logged to the event log (and the UI) instead of executed.
+
+Safety model:
+
+- Off by default; every request needs the token in an `X-Token` header (constant-time compare, failed attempts are delayed).
+  The UI asks for it once per browser session. The token is read from a file or the environment, never from `argv`.
+- Actions are a fixed set of typed requests (`set_airtime`, `scan`, `chan_switch`, `btm`). All fields are validated
+  (interface names, MAC addresses, ranges, puncturing bitmaps against the kernel tables) and turned into an **argv
+  vector for `iw` / `hostapd_cli`** - never a shell string.
+- Every executed action, manual or automatic, is written to the event log with the exact command line.
+- The server has no TLS. With control enabled, keep it on `127.0.0.1` and use an SSH tunnel.
+- Auto modes (`--airtime-auto`, `--steer-auto`) are separate opt-ins with hysteresis (3 consecutive samples before
+  throttling, 5 calm samples before restoring; 10 minute cooldown per client for steering).
+
+| Action | Runs |
+|---|---|
+| `set_airtime` | `iw dev IF station set MAC airtime_weight W` |
+| `scan` | `iw dev IF scan trigger` - **the AP leaves its channel briefly** |
+| `chan_switch` | `hostapd_cli [-p DIR] -i IF [-l LINK] chan_switch COUNT FREQ center_freq1=C bandwidth=B <modes> [punct_bitmap=0xN]` |
+| `btm` | `hostapd_cli -i IF bss_tm_req MAC neighbor=BSSID,0x0000,OPCLASS,CHANNEL,PHYTYPE pref=1 abridged=1 valid_int=100` |
+
+The `hostapd_cli` syntax (notably `-l LINK` for MLD links and `punct_bitmap=`) depends on your hostapd version; check
+it with `hostapd_cli help` before enabling control, and test on a lab AP first.
+
+## How the planner decides
+
+- A 20 MHz subchannel is **busy** if a neighbouring BSS is heard on it at >= -82 dBm (the preamble-detect CCA level).
+  Our own BSSes are ignored. Interference per subchannel also weighs how strong all neighbours are.
+- Without puncturing, a transmission can only use the largest aligned block around the primary 20 MHz that has no busy
+  subchannel. With puncturing, all non-busy subchannels stay usable - if the pattern is valid for the width.
+  A puncturing recommendation needs at least +20 MHz of usable bandwidth and never punctures the primary channel.
+- Channel candidates are the aligned blocks of the same width in the same band, from the phy's channel list (disabled
+  channels excluded; DFS channels get a penalty because they need a channel-availability check). A switch is only
+  recommended if it beats the current channel by a margin.
+- Neighbours are counted on their **primary** channel only (scan results don't tell their width cheaply), and the AP
+  does not scan on its own: the data is as old as the kernel's scan cache. The panel shows its age; use the
+  "Trigger scan" button (control) or `hostapd` ACS to refresh it.
 
 ## Known limitations
 
-- **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). The format of
-  `iw dev X station dump` for an *MLO client* (per-link blocks) is **not yet verified**: a single-link client on an
-  MLD AP is reported without link information, so the UI lists it as "link unknown". Per-link addresses of MLO
-  stations additionally come from mac80211's `link-N` debugfs directories. If an MLO client shows no links, send
-  the output of `iw dev wlan0 station dump`.
+- **Per-link MLO client data is unverified on hardware.** The nl80211 reader follows the kernel source
+  (`nl80211_put_link_station_payload`) and is unit-tested on synthetic messages. If an MLO client shows no per-link
+  numbers, run with `--no-netlink` to compare, and send the output of `iw dev wlan0 station dump`.
+- **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). A single-link
+  client on an MLD AP may be reported without link information; it is then listed as "link unknown".
 - `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`
   lines; the UI shows them by band index and does not map them to 2.4/5/6 GHz.
 - `iw` survey data only covers channels the radio has visited, so noise/busy % is shown for the in-use channel.
-- Retry % is `tx retries / (tx packets + tx retries)` from `iw` counters, an approximation of the MPDU retry rate.
+- Retry % is `tx retries / (tx packets + tx retries)` from the counters, an approximation of the MPDU retry rate.
+- Steering is heuristic: the client's bands are guessed from its protocol (11ac+ -> 5 GHz, 11be -> 6 GHz), and the
+  neighbour report's PHY type values for HE/EHT are unverified. Treat it as a suggestion.
+- Airtime control is a single conservative step (weight scaled by fair share / actual share), not a feedback loop.
+- The kernel log is only followed when the daemon runs as root.
 
 ## Roadmap
 
-Ideas, roughly in order. The first two are read-only; anything that changes radio or client state would be opt-in
-(e.g. a `--allow-control` flag) and off by default.
-
-1. **DFS / event log** – record channel changes, radar state (`rdd_monitor`), firmware recovery and station/MLO-link
-   join/leave events.
-2. **Channel and interference planner** – recommend a channel (and, with per-20 MHz occupancy from scan data, a
-   puncturing pattern) from survey and scan data; advisory first, applying via hostapd later.
-3. **Per-client airtime fairness controller** – adjust airtime weights from per-station stats.
-4. **Roaming / band-steering assistant** – 802.11k/v/r steering of single-link clients, leaving MLO clients alone.
-5. **Throughput test harness** – iperf3 matrix across bandwidth / MLO mode for regression testing mt76 changes.
+- Verify and tune the control actions on hardware (hostapd `-l LINK`, BTM neighbour reports).
+- Neighbour width from scan IEs for a more accurate planner; 802.11k beacon requests for steering decisions.
+- Throughput test harness (iperf3 matrix across bandwidth / MLO mode) for regression-testing mt76 changes.
 
 ## License
 
