@@ -239,6 +239,28 @@ mod tests {
         assert_eq!(bss_width(5180, &ies).unwrap().mhz, 40);
     }
 
+    // Captured from a real neighbour AP (scan on a BPI-R4, `iw` output):
+    //   freq 5240, HT operation: primary channel 48, secondary channel offset: below, STA channel width: any
+    //   VHT operation: channel width: 1 (iw labels it "80 MHz"), center freq segment 1: 42, segment 2: 50
+    //   HE Operation without VHT / 6 GHz information; country IE "Channels [36 - 64]", VHT capabilities 160 MHz.
+    // Width 1 with CCFS1 = CCFS0 + 8 is a 160 MHz channel centred on CCFS1 (channel 50, 5250 MHz).
+    #[test]
+    fn real_neighbour_160_mhz_beacon() {
+        let ies = cat(&[
+            ie(61, &[48, 0x07, 0, 0, 0]),
+            ie(192, &[1, 42, 50, 0xfc, 0xff]),
+            ext(36, &[0xf4, 0x3f, 0x00, 49, 0xfc, 0xff]), // HE operation: 0x003ff4, colour 49, basic MCS 0xfffc
+        ]);
+        let w = bss_width(5240, &ies).unwrap();
+        assert_eq!((w.mhz, w.center1, w.center2), (160, 5250, None));
+        assert_eq!(w.bins(), vec![5180, 5200, 5220, 5240, 5260, 5280, 5300, 5320]);
+        // the same beacons' 2.4 GHz siblings: HT20 with no secondary channel
+        let w = bss_width(2437, &cat(&[ie(61, &[6, 0x00, 0x00, 0x01, 0, 0])])).unwrap();
+        assert_eq!((w.mhz, w.bins()), (20, vec![2437]));
+        // HE operation with no 6 GHz information on its own tells nothing
+        assert_eq!(bss_width(5240, &ext(36, &[0xf4, 0x3f, 0x00, 49, 0xfc, 0xff])), None);
+    }
+
     #[test]
     fn he_6ghz_widths() {
         // params: 6 GHz info present (bit 17); basic MCS 2 bytes; info: primary, control, ccfs0, ccfs1, min rate

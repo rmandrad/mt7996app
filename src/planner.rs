@@ -321,7 +321,8 @@ pub fn build_plan(inp: &PlanInput) -> Plan {
             if b.dfs && !is_cur {
                 score += DFS_PENALTY;
             }
-            let nb: usize = infos.iter().map(|i| i.neighbors).sum();
+            // distinct neighbours: a wide BSS occupies several bins but is one BSS
+            let nb = bss.iter().filter(|n| b.bins.iter().any(|f| occupies(n, *f, window))).count();
             let strongest = infos.iter().filter_map(|i| i.strongest).fold(None, |m: Option<f64>, s| Some(m.map_or(s, |x| x.max(s))));
             let mut reason = format!("{nb} neighbor BSS");
             if let Some(s) = strongest {
@@ -456,6 +457,25 @@ mod tests {
         ht40.width = Some(Width { mhz: 40, center1: 2422, center2: None, punct: 0 });
         assert!(bin_info(2437, false, 15.0, &[&ht40]).busy); // overlaps through the secondary
         assert!(!bin_info(2437, false, 15.0, &[&bss("aa:aa:aa:aa:aa:06", 2412, -60.0)]).busy);
+    }
+
+    #[test]
+    fn wide_neighbour_is_one_neighbour_in_a_candidate() {
+        use crate::ie::Width;
+        let mut wide = bss("aa:aa:aa:aa:aa:02", 5240, -13.0);
+        wide.width = Some(Width { mhz: 160, center1: 5250, center2: None, punct: 0 });
+        let scan = ScanData { ts: 100.0, per_iface: HashMap::from([("wlan0".to_string(), vec![wide])]) };
+        let mut r = radio();
+        (r.width, r.center1, r.freq, r.channel) = (Some(160), Some(5570), Some(5500), Some(100));
+        let mut chans = chans_5g();
+        chans.truncate(8 + 12); // 36..64 and 100..144
+        let phy_chans = HashMap::from([("phy0".to_string(), chans)]);
+        let survey = HashMap::new();
+        let radios = [r];
+        let p = build_plan(&PlanInput { now: 130.0, radios: &radios, scan: Some(&scan), survey: &survey, phy_chans: &phy_chans });
+        let c = p.links[0].candidates.iter().find(|c| c.center1 == 5250).expect("36-64 block");
+        assert_eq!(c.neighbors, 1);
+        assert!(c.reason.starts_with("1 neighbor BSS"), "{}", c.reason);
     }
 
     #[test]

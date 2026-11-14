@@ -458,10 +458,17 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 - **Per-link MLO client data is unverified on hardware.** The nl80211 reader follows the kernel source
   (`nl80211_put_link_station_payload`) and is unit-tested on synthetic messages. If an MLO client shows no per-link
   numbers, run with `--no-netlink` to compare, and send the output of `iw dev wlan0 station dump`.
-- **The neighbour width decoder is unverified on real beacons.** It follows IEEE 802.11-2020 / 802.11be and is
-  unit-tested on elements built from the spec, but has not seen a real 6 GHz / EHT beacon yet. `--check` prints the
-  decoded widths of the scan cache; compare them with `iw dev wlan0 scan dump`. A neighbour is treated as fully
-  occupying its width, a rougher model than a real secondary-channel CCA.
+- **The neighbour width decoder is verified on 2.4 / 5 GHz beacons only.** HT20, HT40 and VHT 160 MHz (the
+  `channel width: 1` with two segments case, which `iw` labels "80 MHz") match a real neighbour AP. The HE 6 GHz and
+  EHT (320 MHz, puncturing) paths follow IEEE 802.11-2020 / 802.11be and are unit-tested on elements built from the
+  spec, but have not met a real 6 GHz beacon yet. `--check` prints the decoded widths of the scan cache; compare them
+  with `iw dev wlan0 scan dump`. A neighbour is treated as fully occupying its width, a rougher model than a real
+  secondary-channel CCA.
+- **Scanning an MLD AP:** `iw dev wlan0 scan trigger` is refused on the MLD interface (`Operation not supported
+  (-95)`), so the dashboard's *Trigger scan* button cannot work there, and the kernel's scan cache stays empty. Scan
+  from a temporary second interface on the same phy; the cache belongs to the phy, so the daemon sees the result:
+  `iw phy phy0 interface add scan0 type managed; ip link set scan0 up; iw dev scan0 scan; iw dev scan0 del`
+  (the AP leaves its channels briefly while it scans).
 - **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). A single-link
   client on an MLD AP may be reported without link information; it is then listed as "link unknown".
 - `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`
