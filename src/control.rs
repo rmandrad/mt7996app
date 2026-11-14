@@ -8,6 +8,7 @@ use crate::events::EventLog;
 use crate::planner::valid_puncturing;
 use crate::util::{is_ifname, is_mac};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -134,6 +135,9 @@ impl Action {
     }
 }
 
+/// Set after every successful scan: the collector then reads the (short-lived) scan cache at once.
+pub static SCAN_FRESH: AtomicBool = AtomicBool::new(false);
+
 /// Name of the short-lived managed interface used to scan from an MLD AP.
 pub const TEMP_SCAN_IFACE: &str = "mt7996scan0";
 const DIRECT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -237,6 +241,7 @@ impl Control {
         match crate::util::run(&prog, &args, DIRECT_SCAN_TIMEOUT) {
             Ok(out) => {
                 self.log.push("info", "control", format!("{who}: {line} -> ok"));
+                SCAN_FRESH.store(true, Ordering::SeqCst);
                 return Ok(out.trim().to_string());
             }
             Err(e) if scan_unsupported(&e) => {
@@ -275,6 +280,7 @@ impl Control {
         match (result, cleanup) {
             (Ok(out), Ok(_)) => {
                 let n = out.lines().filter(|l| l.starts_with("BSS ")).count();
+                SCAN_FRESH.store(true, Ordering::SeqCst);
                 Ok(format!("scan finished from the temporary interface {TEMP_SCAN_IFACE}: {n} BSS in the scan cache"))
             }
             (Ok(_), Err(e)) => Err(format!("scan finished, but the temporary interface {TEMP_SCAN_IFACE} was NOT removed ({e}); run `iw dev {TEMP_SCAN_IFACE} del`")),
@@ -440,7 +446,9 @@ esac"#,
         let go = || c.execute("t", &Action::Scan { iface: "wlan0".into() });
 
         // 1: fallback works
+        SCAN_FRESH.store(false, Ordering::SeqCst);
         let out = go().unwrap();
+        assert!(SCAN_FRESH.swap(false, Ordering::SeqCst), "the collector is told to read the cache now");
         assert!(out.contains("2 BSS"), "{out}");
         let seq: Vec<String> = calls();
         assert_eq!(

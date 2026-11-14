@@ -450,8 +450,10 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 - A neighbour is counted on **every 20 MHz subchannel of its operating width** (decoded from its HT / VHT / HE /
   EHT operation elements, minus the subchannels it punctures). If the width cannot be read (`--no-netlink`, a legacy
   BSS without operation elements) it is counted on its primary channel only; the panel says so when no BSS has a
-  known width. The AP does not scan on its own: the data is as old as the kernel's scan cache. The panel shows its age; use the
-  "Trigger scan" button (control) or `hostapd` ACS to refresh it.
+  known width. The AP does not scan on its own. The kernel forgets scan results after about 30 s, so the daemon
+  remembers every neighbour it has read (per BSSID and frequency) for 15 minutes and reads the cache again right
+  after a scan triggered from the UI. The panel shows the age of the freshest result; use the "Trigger scan" button
+  (control) or `hostapd` ACS to refresh it.
 
 ## Known limitations
 
@@ -467,7 +469,8 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 - **Scanning an MLD AP:** the kernel refuses `iw dev wlan0 scan trigger` on an MLD interface (`Operation not
   supported (-95)`), and the AP never scans on its own, so the scan cache stays empty until something fills it. The
   `scan` control action handles this: after that refusal it scans from a temporary managed interface of the same
-  phy (see the table below). This needs `ip` (iproute2), and the driver has to allow a second interface next to the
+  phy (see the table below); the results are remembered for 15 minutes because the kernel drops them after
+  about 30 s. This needs `ip` (iproute2), and the driver has to allow a second interface next to the
   AP; if it refuses, the error says so. Verified by hand on a BPI-R4 with the commands of the table; the automatic
   fallback itself is unit-tested with fake `iw` / `ip` and has not run on the router yet.
 - **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). A single-link

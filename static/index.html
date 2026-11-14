@@ -763,7 +763,7 @@ function renderPlan(st) {
   if (!p) { $("plan").innerHTML = '<div class="muted">no plan yet</div>'; return; }
   const ifaces = [...new Set(st.radios.map(r => r.iface))];
   let h = `<div class="row muted">${p.scan_age_s != null ? "scan cache age " + fmt(p.scan_age_s, 0, " s") : "no scan data"}
-    ${ifaces.map(i => btn("Trigger scan on " + i, {action: "scan", iface: i}, "Triggering a scan makes the AP leave its channel briefly and may disturb clients.", "warn")).join(" ")}</div>
+    ${ifaces.map(i => btn("Trigger scan on " + i, {action: "scan", iface: i}, "Triggering a scan makes the AP leave its channel briefly and may disturb clients. On an MLD AP the kernel refuses a direct scan, so it runs from a temporary interface (mt7996scan0, removed afterwards) and takes 10-30 s.", "warn")).join(" ")}</div>
     ${p.notes.map(n => `<p class="muted">• ${esc(n)}</p>`).join("")}<div class="grid" style="margin-top:8px">`;
   for (const l of p.links) {
     const pun = l.puncture ? l.puncture.bitmap : 0;

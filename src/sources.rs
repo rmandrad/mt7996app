@@ -10,6 +10,63 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const SCAN_DUMP_EVERY: Duration = Duration::from_secs(15);
 const PHY_INFO_EVERY: Duration = Duration::from_secs(600);
 
+/// How long a neighbour is remembered after it was last heard. The kernel drops scan
+/// results after ~30 s (on every cache read), a 3-band scan takes 10-30 s, so reading
+/// the cache alone would lose the BSSes of the bands scanned first.
+const SCAN_KEEP_S: f64 = 15.0 * 60.0;
+
+/// Neighbour BSSes remembered across reads of the kernel's scan cache.
+#[derive(Default)]
+pub struct ScanStore {
+    by_iface: HashMap<String, HashMap<(String, u32), (Bss, f64)>>,
+}
+
+impl ScanStore {
+    /// Merge one read of `iface`'s cache taken at `now` (unix seconds): newer sightings win,
+    /// a known width is kept when the new read has none, entries older than `SCAN_KEEP_S` go.
+    pub fn update(&mut self, iface: &str, list: Vec<Bss>, now: f64) {
+        let m = self.by_iface.entry(iface.to_string()).or_default();
+        for b in list {
+            let seen = now - b.seen_ms.unwrap_or(0) as f64 / 1000.0;
+            let key = (b.bssid.clone(), b.freq);
+            match m.get_mut(&key) {
+                Some((old, ts)) => {
+                    let width = b.width.clone().or_else(|| old.width.clone());
+                    if seen >= *ts {
+                        *old = Bss { width, ..b };
+                        *ts = seen;
+                    } else {
+                        old.width = width;
+                    }
+                }
+                None => {
+                    m.insert(key, (b, seen));
+                }
+            }
+        }
+        m.retain(|_, (_, ts)| now - *ts <= SCAN_KEEP_S);
+    }
+
+    /// Everything remembered, with `seen_ms` re-expressed as the age at `now`, and the time
+    /// of the freshest sighting.
+    pub fn snapshot(&self, now: f64) -> (HashMap<String, Vec<Bss>>, Option<f64>) {
+        let mut freshest: Option<f64> = None;
+        let mut out = HashMap::new();
+        for (iface, m) in &self.by_iface {
+            let mut v: Vec<Bss> = m
+                .values()
+                .map(|(b, ts)| {
+                    freshest = Some(freshest.map_or(*ts, |f: f64| f.max(*ts)));
+                    Bss { seen_ms: Some(((now - ts).max(0.0) * 1000.0) as u64), ..b.clone() }
+                })
+                .collect();
+            v.sort_by(|a, b| a.bssid.cmp(&b.bssid).then(a.freq.cmp(&b.freq)));
+            out.insert(iface.clone(), v);
+        }
+        (out, freshest)
+    }
+}
+
 pub struct RealSource {
     pub iw: String,
     pub debugfs_root: String,
@@ -19,6 +76,7 @@ pub struct RealSource {
     pub hostapd: Option<HostapdCfg>,
     nl: Option<Nl>,
     last_scan: Option<Instant>,
+    scan_store: ScanStore,
     last_phy: Option<Instant>,
 }
 
@@ -59,6 +117,7 @@ impl RealSource {
             hostapd,
             nl: None,
             last_scan: None,
+            scan_store: ScanStore::default(),
             last_phy: None,
         }
     }
@@ -188,11 +247,12 @@ impl Source for RealSource {
             }
         }
 
-        // scan cache (neighbour BSSes) for the planner: cheap, but not every second
-        if self.last_scan.is_none_or(|t| t.elapsed() >= SCAN_DUMP_EVERY) {
+        // scan cache (neighbour BSSes) for the planner: cheap, but not every second. Read it at
+        // once after a control scan: the kernel forgets results after ~30 s.
+        let forced = crate::control::SCAN_FRESH.swap(false, std::sync::atomic::Ordering::SeqCst);
+        if forced || self.last_scan.is_none_or(|t| t.elapsed() >= SCAN_DUMP_EVERY) {
             self.last_scan = Some(Instant::now());
-            let mut per_iface = HashMap::new();
-            let mut freshest_ms: Option<u64> = None;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
             for i in &ifaces {
                 if !matches!(i.kind.as_deref(), None | Some("AP") | Some("mesh point") | Some("P2P-GO")) {
                     continue;
@@ -204,16 +264,12 @@ impl Source for RealSource {
                             self.merge_scan_widths(idx, &i.name, &mut bss, &mut raw.errors);
                         }
                     }
-                    for ms in bss.iter().filter_map(|b| b.seen_ms) {
-                        freshest_ms = Some(freshest_ms.map_or(ms, |m| m.min(ms)));
-                    }
-                    per_iface.insert(i.name.clone(), bss);
+                    self.scan_store.update(&i.name, bss, now);
                 }
             }
+            let (per_iface, freshest) = self.scan_store.snapshot(now);
             if per_iface.values().any(|v| !v.is_empty()) {
-                // timestamp of the most recent scan result, not of this read
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-                raw.scan = Some(ScanData { ts: now - freshest_ms.unwrap_or(0) as f64 / 1000.0, per_iface });
+                raw.scan = Some(ScanData { ts: freshest.unwrap_or(now), per_iface });
             }
         }
         // channel lists (regulatory flags, DFS) change rarely
@@ -508,5 +564,58 @@ impl Source for DemoSource {
             hw: vec![hw],
             errors: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_store_tests {
+    use super::*;
+    use crate::ie::Width;
+
+    fn bss(id: &str, freq: u32, seen_ms: u64, width: Option<u32>) -> Bss {
+        Bss {
+            bssid: id.into(),
+            freq,
+            signal: -60.0,
+            ssid: "x".into(),
+            seen_ms: Some(seen_ms),
+            width: width.map(|mhz| Width { mhz, center1: freq, center2: None, punct: 0 }),
+        }
+    }
+
+    #[test]
+    fn results_survive_the_kernel_cache_expiring() {
+        let mut s = ScanStore::default();
+        // right after the scan: 5 GHz and 2.4 GHz neighbours
+        s.update("wlan0", vec![bss("a", 5240, 3_000, Some(160)), bss("b", 2462, 20_000, None)], 1000.0);
+        // 15 s later the kernel has dropped the old one; the daemon must not forget it
+        s.update("wlan0", vec![bss("a", 5240, 18_000, None)], 1015.0);
+        let (snap, freshest) = s.snapshot(1015.0);
+        let v = &snap["wlan0"];
+        assert_eq!(v.iter().map(|b| b.bssid.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        // the width of the first read is kept, the age is re-based to "now"
+        assert_eq!(v[0].width.as_ref().map(|w| w.mhz), Some(160));
+        assert_eq!(v[1].seen_ms, Some(35_000));
+        assert_eq!(freshest, Some(997.0));
+    }
+
+    #[test]
+    fn newer_sightings_win_and_old_ones_expire() {
+        let mut s = ScanStore::default();
+        s.update("wlan0", vec![bss("a", 5240, 10_000, None)], 1000.0);
+        let mut newer = bss("a", 5240, 1_000, Some(80));
+        newer.signal = -40.0;
+        s.update("wlan0", vec![newer], 1100.0);
+        let (snap, _) = s.snapshot(1100.0);
+        assert_eq!((snap["wlan0"][0].signal, snap["wlan0"][0].seen_ms), (-40.0, Some(1_000)));
+        // an older sighting does not replace a newer one
+        s.update("wlan0", vec![bss("a", 5240, 50_000, None)], 1100.0);
+        assert_eq!(s.snapshot(1100.0).0["wlan0"][0].signal, -40.0);
+        // 15 minutes without hearing it: gone, even if the kernel returns nothing
+        s.update("wlan0", vec![], 1099.0 + SCAN_KEEP_S + 2.0);
+        assert!(s.snapshot(2000.0).0["wlan0"].is_empty());
+        // the same BSSID on another frequency is a different entry
+        s.update("wlan0", vec![bss("c", 2412, 0, None), bss("c", 5180, 0, None)], 3000.0);
+        assert_eq!(s.snapshot(3000.0).0["wlan0"].len(), 2);
     }
 }
