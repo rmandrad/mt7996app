@@ -758,13 +758,22 @@ document.addEventListener("click", ev => {
 });
 
 // ------------------------------------------------------------- planner ----
+function neighborTable(nb) {
+  if (!nb.length) return "";
+  const rows = nb.map(n => `<tr><td><span class="band ${bandCls(n.freq < 3000 ? "2.4G" : n.freq < 5925 ? "5G" : "6G")}">${n.freq < 3000 ? "2.4G" : n.freq < 5925 ? "5G" : "6G"}</span> ${n.freq}</td>
+    <td class="num">${fmt(n.signal, 0)} dBm</td><td>${n.width ? n.width + " MHz" + (n.center1 ? " (centre " + n.center1 + ")" : "") : "<span class='muted'>unknown</span>"}</td>
+    <td style="white-space:normal">${esc(n.ssid) || "<span class='muted'>hidden</span>"}${n.own ? " <span class='muted'>(this AP)</span>" : ""}</td>
+    <td class="muted">${esc(n.bssid)}</td><td class="num">${n.age_s != null ? fmt(n.age_s, 0, " s") : "–"}</td></tr>`).join("");
+  return `<details><summary class="muted">neighbours (${nb.length})</summary><table><tr><th>MHz</th><th class="num">signal</th><th>width</th><th>SSID</th><th>BSSID</th><th class="num">age</th></tr>${rows}</table></details>`;
+}
+
 function renderPlan(st) {
   const p = st.plan;
   if (!p) { $("plan").innerHTML = '<div class="muted">no plan yet</div>'; return; }
   const ifaces = [...new Set(st.radios.map(r => r.iface))];
   let h = `<div class="row muted">${p.scan_age_s != null ? "scan cache age " + fmt(p.scan_age_s, 0, " s") : "no scan data"}
     ${ifaces.map(i => btn("Trigger scan on " + i, {action: "scan", iface: i}, "Triggering a scan makes the AP leave its channel briefly and may disturb clients. On an MLD AP the kernel refuses a direct scan, so it runs from a temporary interface (mt7996scan0, removed afterwards) and takes 10-30 s.", "warn")).join(" ")}</div>
-    ${p.notes.map(n => `<p class="muted">• ${esc(n)}</p>`).join("")}<div class="grid" style="margin-top:8px">`;
+    ${p.notes.map(n => `<p class="muted">• ${esc(n)}</p>`).join("")}${neighborTable(p.neighbors || [])}<div class="grid" style="margin-top:8px">`;
   for (const l of p.links) {
     const pun = l.puncture ? l.puncture.bitmap : 0;
     const strip = l.bins.map((b, i) => `<i class="${b.busy ? "busy" : ""} ${b.primary ? "prim" : ""} ${pun & (1 << i) ? "punct" : ""}"

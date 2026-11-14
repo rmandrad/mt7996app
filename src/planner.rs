@@ -117,13 +117,31 @@ pub struct LinkPlan {
     pub recommend: Option<Candidate>,
 }
 
+/// A BSS of the scan data as the planner sees it (for the UI and for debugging).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Neighbor {
+    pub bssid: String,
+    pub ssid: String,
+    pub freq: u32,
+    pub signal: f64,
+    /// operating width decoded from the beacon; `None` = unknown (counted on the primary 20 MHz only)
+    pub width: Option<u32>,
+    pub center1: Option<u32>,
+    pub age_s: Option<f64>,
+    /// one of this AP's own BSSes (ignored by the planner)
+    pub own: bool,
+}
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Plan {
     pub ts: f64,
     pub scan_age_s: Option<f64>,
     pub notes: Vec<String>,
+    pub neighbors: Vec<Neighbor>,
     pub links: Vec<LinkPlan>,
 }
+
+const MAX_LISTED_NEIGHBORS: usize = 200;
 
 pub struct PlanInput<'a> {
     pub now: f64,
@@ -277,6 +295,21 @@ pub fn build_plan(inp: &PlanInput) -> Plan {
         }
     }
     if let Some(sc) = inp.scan {
+        let mut seen = HashSet::new();
+        for b in sc.per_iface.values().flatten().filter(|b| seen.insert((b.bssid.clone(), b.freq))) {
+            plan.neighbors.push(Neighbor {
+                bssid: b.bssid.clone(),
+                ssid: b.ssid.clone(),
+                freq: b.freq,
+                signal: b.signal,
+                width: b.width.as_ref().map(|w| w.mhz * if w.center2.is_some() { 2 } else { 1 }),
+                center1: b.width.as_ref().map(|w| w.center1),
+                age_s: b.seen_ms.map(|m| m as f64 / 1000.0),
+                own: own.contains(&b.bssid),
+            });
+        }
+        plan.neighbors.sort_by(|a, b| b.signal.total_cmp(&a.signal).then(a.bssid.cmp(&b.bssid)));
+        plan.neighbors.truncate(MAX_LISTED_NEIGHBORS);
         let all = sc.per_iface.values().flatten();
         if all.clone().next().is_some() && all.clone().all(|b| b.width.is_none()) {
             plan.notes.push("neighbour widths unknown (nl80211 scan dump unavailable or --no-netlink): neighbours are counted on their primary 20 MHz only".into());
@@ -492,6 +525,9 @@ mod tests {
         let p = build_plan(&PlanInput { now: 130.0, radios: &radios, scan: Some(&scan), survey: &survey, phy_chans: &chans });
         let l = &p.links[0];
         assert_eq!(p.scan_age_s, Some(30.0));
+        // the neighbour list shows what the planner was given, strongest first, own BSSes flagged
+        assert_eq!(p.neighbors.iter().map(|n| (n.bssid.as_str(), n.own)).collect::<Vec<_>>(), [("02:00:00:00:00:01", true), ("aa:aa:aa:aa:aa:01", false)]);
+        assert_eq!((p.neighbors[1].freq, p.neighbors[1].width, p.neighbors[1].age_s), (5240, None, Some(1.0)));
         assert_eq!(l.bins.iter().map(|b| b.busy).collect::<Vec<_>>(), vec![false, false, false, true]); // own BSS ignored
         assert_eq!(l.clear_mhz, 40);
         let pr = l.puncture.as_ref().unwrap();
