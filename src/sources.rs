@@ -88,6 +88,31 @@ impl RealSource {
         }
     }
 
+    /// Fill in the operating width of the scanned BSSes from the kernel's IEs
+    /// (iw prints the HE / EHT operation elements as raw hex). Best effort: on any
+    /// failure the BSSes keep an unknown width and the planner uses their primary channel.
+    fn merge_scan_widths(&mut self, ifindex: u32, iface: &str, bss: &mut [Bss], errors: &mut Vec<String>) {
+        if self.nl.is_none() {
+            match Nl::open() {
+                Ok(n) => self.nl = Some(n),
+                Err(_) => return, // already reported by the station reader
+            }
+        }
+        match self.nl.as_mut().unwrap().dump_scan(ifindex) {
+            Err(e) => {
+                self.nl = None;
+                errors.push(format!("nl80211 scan dump on {iface}: {e}; neighbour widths unknown"));
+            }
+            Ok(list) => {
+                for nb in list {
+                    if let Some(b) = bss.iter_mut().find(|b| b.bssid == nb.bssid && b.freq == nb.freq) {
+                        b.width = nb.width;
+                    }
+                }
+            }
+        }
+    }
+
     fn run(&self, args: &[&str]) -> Result<String, String> {
         crate::util::run_strs(&self.iw, args, self.timeout)
     }
@@ -171,7 +196,12 @@ impl Source for RealSource {
                     continue;
                 }
                 if let Ok(t) = self.run(&["dev", &i.name, "scan", "dump"]) {
-                    let bss = iwparse::parse_scan_dump(&t);
+                    let mut bss = iwparse::parse_scan_dump(&t);
+                    if self.use_netlink {
+                        if let Some(idx) = i.ifindex {
+                            self.merge_scan_widths(idx, &i.name, &mut bss, &mut raw.errors);
+                        }
+                    }
                     for ms in bss.iter().filter_map(|b| b.seen_ms) {
                         freshest_ms = Some(freshest_ms.map_or(ms, |m| m.min(ms)));
                     }
@@ -432,6 +462,11 @@ impl Source for DemoSource {
             signal,
             ssid: ssid.into(),
             seen_ms: Some(3000),
+            width: None,
+        };
+        let wide = |mut b: Bss, mhz: u32, center1: u32| {
+            b.width = Some(crate::ie::Width { mhz, center1, center2: None, punct: 0 });
+            b
         };
         let neighbours = vec![
             bss("f0:9f:c2:00:00:01", 2437, -55.0, "NeighborNet"),
@@ -440,8 +475,8 @@ impl Source for DemoSource {
             bss("f0:9f:c2:00:00:04", 2462, -60.0, "Guest"),
             bss("f0:9f:c2:00:00:05", 5240, -62.0, "Office-5G"),
             bss("f0:9f:c2:00:00:06", 5300, -75.0, "Office-5G-2"),
-            bss("f0:9f:c2:00:00:07", 5500, -70.0, "Upstairs"),
-            bss("f0:9f:c2:00:00:08", 6035, -80.0, "WiFi7-Lab"),
+            wide(bss("f0:9f:c2:00:00:07", 5500, -70.0, "Upstairs"), 80, 5530),
+            wide(bss("f0:9f:c2:00:00:08", 6035, -80.0, "WiFi7-Lab"), 40, 6045),
             bss("02:00:00:00:00:02", 5180, -30.0, "mt7996-demo"), // our own BSS: ignored by the planner
         ];
         let now_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);

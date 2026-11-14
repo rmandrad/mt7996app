@@ -19,7 +19,8 @@ It shows what MLO (multi-link operation) is actually doing and helps you tune th
 
 **Advice (computed, never applied on its own)**
 
-- **Channel and puncturing planner** - scores the neighbour BSSes of the kernel's scan cache per 20 MHz subchannel,
+- **Channel and puncturing planner** - scores the neighbour BSSes of the kernel's scan cache per 20 MHz subchannel
+  (a neighbour counts on every subchannel of its own operating width, decoded from its beacon),
   recommends a channel, and recommends an EHT **preamble-puncturing** pattern when a busy secondary subchannel would
   otherwise cut the usable bandwidth. Patterns are checked against the same tables as the kernel (`net/wireless/chan.c`).
 - **Airtime fairness** - spots clients that use most of the airtime while moving little data and suggests a lower
@@ -33,8 +34,10 @@ It shows what MLO (multi-link operation) is actually doing and helps you tune th
 Written in Rust (`serde`, `regex`, `tiny_http`, `libc`); the web UI is a single embedded HTML file with no external assets.
 
 > Status: version 0.2. Verified on a BPI-R4 with a 2-link MLD AP: `iw dev`/`station dump` parsing, survey, debugfs
-> panels. **Not yet verified on hardware**: the nl80211 per-link reader for a real MLO client, the planner, and every
-> control action (they are unit-tested and exercised in `--demo` mode). See [Known limitations](#known-limitations).
+> panels. **Not yet verified on hardware**: the nl80211 per-link reader for a real MLO client, the planner (incl. the
+> neighbour width decoder), and every control action (they are unit-tested and exercised in `--demo` mode).
+> `mt7996app --check` is a read-only self-test for exactly these, see [First run on hardware](#first-run-on-hardware---check).
+> See also [Known limitations](#known-limitations).
 
 ## Screenshots
 
@@ -77,6 +80,7 @@ Every `--interval` seconds (default 2 s) the collector reads:
 | nl80211 (generic netlink, `NL80211_CMD_GET_STATION`) | per-link statistics of MLO clients (signal, bytes, rates, retries, airtime) |
 | `iw dev <if> survey dump` | noise floor, channel busy/tx/rx airtime |
 | `iw dev <if> scan dump` | neighbouring BSSes for the planner (the kernel's scan **cache**, no scan is triggered) |
+| nl80211 (`NL80211_CMD_GET_SCAN` dump) | operating width of each neighbour, decoded from its HT / VHT / HE / EHT operation elements (`iw` prints the HE / EHT ones as raw hex) |
 | `iw phy <phy> info` | usable channels, DFS (radar) flags |
 | `hostapd_cli status` (optional) | DFS / CAC state |
 | `/dev/kmsg` (optional, root) | DFS, radar, firmware and mt76 messages for the event log |
@@ -172,6 +176,35 @@ ssh root@<router> 'mt7996app --once'                    # quick sanity check
 
 `--once` samples twice and prints a text summary (add `--json` for the full state), which is the quickest way to
 check that `iw` and debugfs are being read correctly.
+
+### First run on hardware: `--check`
+
+Before enabling anything, run the self-test on the router (as root, with the AP up and, ideally, a Wi-Fi 7 client
+connected with MLO):
+
+```sh
+mt7996app --check                 # add --hostapd-ctrl DIR if hostapd's socket is not in /var/run/hostapd
+```
+
+It only reads: dumps, `hostapd_cli -h` and `hostapd_cli ... status`. Nothing is changed. It prints `OK` / `INFO` /
+`WARN` / `FAIL` lines in these groups, and exits with status 1 if anything FAILed:
+
+- **Environment** - root, `iw`, the mt7996 phy, debugfs.
+- **MLO client statistics** - compares what nl80211 reports per link with what mac80211's debugfs lists for the
+  client. A client that debugfs knows as MLO but nl80211 returns no links for is a `FAIL` (the per-link reader is not
+  working; send the output of `iw dev wlan0 station dump`). Without an MLO client this stays a warning:
+  *not verified*.
+- **Neighbour scan** - how many BSSes the kernel's scan cache has, and the decoded widths (`20 MHz: 4, 80 MHz: 2,
+  160 MHz: 1 ...`) with a few BSSes to compare by eye against `iw dev wlan0 scan dump`.
+- **hostapd_cli** - the `chan_switch` and `bss_tm_req` commands and the `-l <link_id>` option exist, and
+  `hostapd_cli -i wlan0 -l N status` works for every link of an MLD with the same frequency as `iw dev` reports. It
+  also checks that the kernel advertises *preamble puncturing in AP mode*.
+- **Control commands** - the exact command line of each control action, built from the live state and the planner's
+  recommendation, **printed but not run**. Compare them with `hostapd_cli -h` and your hostapd version.
+
+What it cannot prove is listed at the end as *not verified by --check*: `punct_bitmap=` is parsed by hostapd itself,
+and `set_airtime`, `scan` and `btm` only show their worth when run. Try them once on a lab AP with
+`--allow-control --control-dry-run`, then for real from the UI, and read the event log.
 
 ### Run it
 
@@ -346,6 +379,7 @@ Only listen on `0.0.0.0` / a LAN address on a trusted management network or behi
 --iw PATH         path to the iw binary
 --debugfs PATH    debugfs ieee80211 root (default /sys/kernel/debug/ieee80211)
 --once [--json]   sample twice, print a summary (or JSON) and exit
+--check           read-only self-test for the first run on hardware (see "First run on hardware")
 --no-netlink      do not read per-link statistics from nl80211 (iw only)
 --no-kmsg         do not follow /dev/kmsg
 --hostapd-cli P   hostapd_cli binary; --hostapd-ctrl DIR passes -p DIR (control socket directory)
@@ -413,8 +447,10 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 - Channel candidates are the aligned blocks of the same width in the same band, from the phy's channel list (disabled
   channels excluded; DFS channels get a penalty because they need a channel-availability check). A switch is only
   recommended if it beats the current channel by a margin.
-- Neighbours are counted on their **primary** channel only (scan results don't tell their width cheaply), and the AP
-  does not scan on its own: the data is as old as the kernel's scan cache. The panel shows its age; use the
+- A neighbour is counted on **every 20 MHz subchannel of its operating width** (decoded from its HT / VHT / HE /
+  EHT operation elements, minus the subchannels it punctures). If the width cannot be read (`--no-netlink`, a legacy
+  BSS without operation elements) it is counted on its primary channel only; the panel says so when no BSS has a
+  known width. The AP does not scan on its own: the data is as old as the kernel's scan cache. The panel shows its age; use the
   "Trigger scan" button (control) or `hostapd` ACS to refresh it.
 
 ## Known limitations
@@ -422,6 +458,10 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 - **Per-link MLO client data is unverified on hardware.** The nl80211 reader follows the kernel source
   (`nl80211_put_link_station_payload`) and is unit-tested on synthetic messages. If an MLO client shows no per-link
   numbers, run with `--no-netlink` to compare, and send the output of `iw dev wlan0 station dump`.
+- **The neighbour width decoder is unverified on real beacons.** It follows IEEE 802.11-2020 / 802.11be and is
+  unit-tested on elements built from the spec, but has not seen a real 6 GHz / EHT beacon yet. `--check` prints the
+  decoded widths of the scan cache; compare them with `iw dev wlan0 scan dump`. A neighbour is treated as fully
+  occupying its width, a rougher model than a real secondary-channel CCA.
 - **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). A single-link
   client on an MLD AP may be reported without link information; it is then listed as "link unknown".
 - `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`
@@ -445,7 +485,7 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
 ## Roadmap
 
 - Verify and tune the control actions on hardware (hostapd `-l LINK`, BTM neighbour reports).
-- Neighbour width from scan IEs for a more accurate planner; 802.11k beacon requests for steering decisions.
+- Check the neighbour width decoder against real 6 GHz / EHT beacons; 802.11k beacon requests for steering decisions.
 - History: cap the number of stored series, and a CSV / JSON export of the shown period.
 - Throughput test harness (iperf3 matrix across bandwidth / MLO mode) for regression-testing mt76 changes.
 

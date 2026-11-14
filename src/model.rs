@@ -170,6 +170,8 @@ pub struct Bss {
     pub signal: f64,
     pub ssid: String,
     pub seen_ms: Option<u64>,
+    /// operating width / centre from the BSS's information elements (nl80211); `None` = unknown
+    pub width: Option<crate::ie::Width>,
 }
 
 #[derive(Clone, Default, Debug)]

@@ -233,8 +233,18 @@ fn recommend_puncture(width: u32, center1: u32, primary: u32, bins: &[BinInfo]) 
     )
 }
 
+/// Does the neighbour occupy the 20 MHz subchannel centred on `freq`? Uses its
+/// whole operating width when known (decoded from its IEs), else only its primary channel.
+fn occupies(b: &Bss, freq: u32, window: f64) -> bool {
+    let hit = |f: u32| (f as f64 - freq as f64).abs() < window;
+    match &b.width {
+        Some(w) if w.mhz > 20 => w.bins().into_iter().any(hit) || hit(b.freq),
+        _ => hit(b.freq),
+    }
+}
+
 fn bin_info(freq: u32, primary: bool, window: f64, bss: &[&Bss]) -> BinInfo {
-    let near: Vec<&&Bss> = bss.iter().filter(|b| (b.freq as f64 - freq as f64).abs() < window).collect();
+    let near: Vec<&&Bss> = bss.iter().filter(|b| occupies(b, freq, window)).collect();
     let strongest = near.iter().map(|b| b.signal).fold(None, |m: Option<f64>, s| Some(m.map_or(s, |x| x.max(s))));
     BinInfo {
         freq,
@@ -264,6 +274,12 @@ pub fn build_plan(inp: &PlanInput) -> Plan {
             if inp.now - s.ts > 600.0 {
                 plan.notes.push("scan data is older than 10 minutes".into());
             }
+        }
+    }
+    if let Some(sc) = inp.scan {
+        let all = sc.per_iface.values().flatten();
+        if all.clone().next().is_some() && all.clone().all(|b| b.width.is_none()) {
+            plan.notes.push("neighbour widths unknown (nl80211 scan dump unavailable or --no-netlink): neighbours are counted on their primary 20 MHz only".into());
         }
     }
     for r in inp.radios {
@@ -357,7 +373,7 @@ mod tests {
     use super::*;
 
     fn bss(addr: &str, freq: u32, sig: f64) -> Bss {
-        Bss { bssid: addr.into(), freq, signal: sig, ssid: "x".into(), seen_ms: Some(1000) }
+        Bss { bssid: addr.into(), freq, signal: sig, ssid: "x".into(), seen_ms: Some(1000), width: None }
     }
 
     #[test]
@@ -421,6 +437,25 @@ mod tests {
             addr: Some("02:00:00:00:00:01".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn wide_neighbour_occupies_its_whole_width() {
+        use crate::ie::Width;
+        let mut wide = bss("aa:aa:aa:aa:aa:02", 5200, -60.0);
+        wide.width = Some(Width { mhz: 80, center1: 5210, center2: None, punct: 0 });
+        let mut punct = bss("aa:aa:aa:aa:aa:03", 5200, -60.0);
+        punct.width = Some(Width { mhz: 80, center1: 5210, center2: None, punct: 0b1000 }); // 5240 punctured
+        let narrow = bss("aa:aa:aa:aa:aa:04", 5200, -60.0);
+        let busy = |b: &Bss| -> Vec<bool> { [5180, 5200, 5220, 5240].map(|f| bin_info(f, false, 10.0, &[b]).busy).to_vec() };
+        assert_eq!(busy(&wide), vec![true; 4]);
+        assert_eq!(busy(&punct), vec![true, true, true, false]);
+        assert_eq!(busy(&narrow), vec![false, true, false, false]); // unknown width: primary only
+        // 2.4 GHz HT40: primary ch 1 (2412) + secondary above (2432), windows are wider there
+        let mut ht40 = bss("aa:aa:aa:aa:aa:05", 2412, -60.0);
+        ht40.width = Some(Width { mhz: 40, center1: 2422, center2: None, punct: 0 });
+        assert!(bin_info(2437, false, 15.0, &[&ht40]).busy); // overlaps through the secondary
+        assert!(!bin_info(2437, false, 15.0, &[&bss("aa:aa:aa:aa:aa:06", 2412, -60.0)]).busy);
     }
 
     #[test]

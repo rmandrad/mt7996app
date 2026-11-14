@@ -81,17 +81,7 @@ impl Action {
     /// Validate and build `(program, args)`.
     pub fn argv(&self, cfg: &ControlCfg) -> Result<(String, Vec<String>), String> {
         let s = |x: &str| x.to_string();
-        let hostapd = |iface: &str, link: Option<u32>| {
-            let mut a = vec![];
-            if let Some(c) = &cfg.hostapd_ctrl {
-                a.extend([s("-p"), c.clone()]);
-            }
-            a.extend([s("-i"), s(iface)]);
-            if let Some(l) = link {
-                a.extend([s("-l"), l.to_string()]);
-            }
-            a
-        };
+        let hostapd = |iface: &str, link: Option<u32>| crate::hostapd::prefix(cfg.hostapd_ctrl.as_deref(), iface, link);
         match self {
             Action::SetAirtime { iface, mac, weight } => {
                 if !is_ifname(iface) || !is_mac(mac) || !(1..=1024).contains(weight) {

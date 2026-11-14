@@ -19,18 +19,40 @@ pub fn parse_status(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub fn status(cfg: &HostapdCfg, iface: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut args: Vec<String> = vec![];
-    if let Some(c) = &cfg.ctrl {
-        args.extend(["-p".to_string(), c.clone()]);
+/// `[-p DIR] -i IFACE [-l LINK]`: the common prefix of every hostapd_cli call
+/// (control actions and status polls build their argv from it).
+pub fn prefix(ctrl: Option<&str>, iface: &str, link: Option<u32>) -> Vec<String> {
+    let mut a: Vec<String> = vec![];
+    if let Some(c) = ctrl {
+        a.extend(["-p".to_string(), c.to_string()]);
     }
-    args.extend(["-i".to_string(), iface.to_string(), "status".to_string()]);
+    a.extend(["-i".to_string(), iface.to_string()]);
+    if let Some(l) = link {
+        a.extend(["-l".to_string(), l.to_string()]);
+    }
+    a
+}
+
+/// `hostapd_cli status`, for one link of an MLD interface when `link` is set.
+pub fn status_link(cfg: &HostapdCfg, iface: &str, link: Option<u32>) -> Result<BTreeMap<String, String>, String> {
+    let mut args = prefix(cfg.ctrl.as_deref(), iface, link);
+    args.push("status".to_string());
     crate::util::run(&cfg.cli, &args, Duration::from_secs(3)).map(|t| parse_status(&t))
+}
+
+pub fn status(cfg: &HostapdCfg, iface: &str) -> Result<BTreeMap<String, String>, String> {
+    status_link(cfg, iface, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_forms() {
+        assert_eq!(prefix(None, "wlan0", None).join(" "), "-i wlan0");
+        assert_eq!(prefix(Some("/var/run/hostapd"), "wlan0", Some(1)).join(" "), "-p /var/run/hostapd -i wlan0 -l 1");
+    }
 
     #[test]
     fn status_parsing() {

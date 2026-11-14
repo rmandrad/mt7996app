@@ -6,6 +6,7 @@
 //! `nl80211_put_link_station_payload`). This module reads those directly.
 //! Only what is needed is implemented; all structure parsing is pure and
 //! unit-tested on synthetic buffers.
+use crate::ie;
 use crate::model::{Rate, Stats};
 use std::collections::BTreeMap;
 use std::io;
@@ -24,6 +25,12 @@ const NLA_TYPE_MASK: u16 = 0x3fff;
 
 // nl80211 (include/uapi/linux/nl80211.h)
 const NL80211_CMD_GET_STATION: u8 = 17;
+const NL80211_CMD_GET_SCAN: u8 = 32;
+const NL80211_ATTR_BSS: u16 = 47;
+const BSS_BSSID: u16 = 1;
+const BSS_FREQUENCY: u16 = 2;
+const BSS_INFORMATION_ELEMENTS: u16 = 6;
+const BSS_BEACON_IES: u16 = 11;
 const NL80211_ATTR_IFINDEX: u16 = 3;
 const NL80211_ATTR_MAC: u16 = 6;
 const NL80211_ATTR_STA_INFO: u16 = 21;
@@ -293,6 +300,35 @@ fn station_dump_request(ifindex: u32) -> Vec<u8> {
     a
 }
 
+// ------------------------------------------------------------- scan data --
+
+/// A BSS of the kernel's scan cache with the width decoded from its IEs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NlBss {
+    pub bssid: String,
+    pub freq: u32,
+    pub width: Option<ie::Width>,
+}
+
+/// Parse one `NL80211_CMD_GET_SCAN` reply message (an `NL80211_ATTR_BSS` nest).
+/// Probe-response IEs are tried first, then the beacon IEs.
+pub fn parse_scan_attrs(b: &[u8]) -> Option<NlBss> {
+    let bss = attrs(b).find(|(t, _)| *t == NL80211_ATTR_BSS)?.1;
+    let (mut bssid, mut freq, mut ies, mut beacon) = (None, None, None, None);
+    for (t, v) in attrs(bss) {
+        match t {
+            BSS_BSSID => bssid = mac_of(v),
+            BSS_FREQUENCY => freq = u32_of(v),
+            BSS_INFORMATION_ELEMENTS => ies = Some(v),
+            BSS_BEACON_IES => beacon = Some(v),
+            _ => {}
+        }
+    }
+    let freq = freq?;
+    let width = [ies, beacon].into_iter().flatten().find_map(|i| ie::bss_width(freq, i));
+    Some(NlBss { bssid: bssid?, freq, width })
+}
+
 // ---------------------------------------------------------------- socket --
 
 pub struct Nl {
@@ -397,6 +433,15 @@ impl Nl {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "nl80211 family not found (cfg80211 not loaded?)"))
     }
 
+    /// The scan cache of an interface with each BSS's operating width.
+    pub fn dump_scan(&mut self, ifindex: u32) -> io::Result<Vec<NlBss>> {
+        let mut a = vec![];
+        put_attr(&mut a, NL80211_ATTR_IFINDEX, &ifindex.to_ne_bytes());
+        let family = self.family;
+        let replies = self.transact(family, NLM_F_REQUEST | NLM_F_DUMP, NL80211_CMD_GET_SCAN, &a)?;
+        Ok(replies.iter().filter_map(|r| parse_scan_attrs(r)).collect())
+    }
+
     /// Dump all stations of an interface, including per-link statistics.
     pub fn dump_stations(&mut self, ifindex: u32) -> io::Result<Vec<NlStation>> {
         let a = station_dump_request(ifindex);
@@ -457,6 +502,39 @@ mod tests {
         put_attr(&mut m, NL80211_ATTR_MAC, &MAC);
         m.extend(links);
         m
+    }
+
+    fn bss_msg(mac: [u8; 6], freq: u32, ies: &[u8], beacon: Option<&[u8]>) -> Vec<u8> {
+        let mut bss = vec![];
+        put_attr(&mut bss, BSS_BSSID, &mac);
+        put_attr(&mut bss, BSS_FREQUENCY, &freq.to_ne_bytes());
+        put_attr(&mut bss, BSS_INFORMATION_ELEMENTS, ies);
+        if let Some(b) = beacon {
+            put_attr(&mut bss, BSS_BEACON_IES, b);
+        }
+        let mut m = vec![];
+        put_attr(&mut m, NL80211_ATTR_IFINDEX, &17u32.to_ne_bytes());
+        m.extend(nest(NL80211_ATTR_BSS, &bss));
+        m
+    }
+
+    #[test]
+    fn scan_reply_width() {
+        let vht80 = [0x3d, 5, 44, 0x05, 0, 0, 0, 0xc0, 5, 1, 42, 0, 0, 0];
+        let b = parse_scan_attrs(&bss_msg(MAC, 5220, &vht80, None)).unwrap();
+        assert_eq!((b.bssid.as_str(), b.freq), ("10:91:d1:f7:5e:bd", 5220));
+        let w = b.width.unwrap();
+        assert_eq!((w.mhz, w.center1), (80, 5210));
+        // the probe response carries no operation element: the beacon IEs are used
+        let b = parse_scan_attrs(&bss_msg(MAC, 5220, &[0, 1, b'x'], Some(&vht80))).unwrap();
+        assert_eq!(b.width.unwrap().mhz, 80);
+        // neither has one: BSS is still reported, width unknown
+        let b = parse_scan_attrs(&bss_msg(MAC, 5220, &[0, 1, b'x'], None)).unwrap();
+        assert_eq!(b.width, None);
+        // message without an NL80211_ATTR_BSS
+        let mut m = vec![];
+        put_attr(&mut m, NL80211_ATTR_IFINDEX, &17u32.to_ne_bytes());
+        assert_eq!(parse_scan_attrs(&m), None);
     }
 
     #[test]
@@ -543,5 +621,19 @@ mod tests {
         let r = nl.dump_stations(1);
         eprintln!("dump on lo: {r:?}");
         assert!(r.is_err() || r.unwrap().is_empty());
+    }
+
+    /// Dump the scan cache of the interface in MT7996APP_TEST_IFINDEX (any wifi
+    /// interface, no root needed) and print the decoded widths:
+    /// `MT7996APP_TEST_IFINDEX=3 cargo test live_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_scan_dump() {
+        let idx: u32 = std::env::var("MT7996APP_TEST_IFINDEX").ok().and_then(|v| v.parse().ok()).expect("set MT7996APP_TEST_IFINDEX");
+        let list = Nl::open().expect("nl80211").dump_scan(idx).expect("scan dump");
+        for b in &list {
+            eprintln!("{} {} {:?}", b.bssid, b.freq, b.width);
+        }
+        eprintln!("{} BSS in the scan cache (an empty cache is fine: the request itself must not fail)", list.len());
     }
 }

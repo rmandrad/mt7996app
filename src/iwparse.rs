@@ -294,7 +294,7 @@ pub fn parse_scan_dump(text: &str) -> Vec<Bss> {
     let mut out: Vec<Bss> = vec![];
     for line in text.lines() {
         if let Some(c) = re!(r"^BSS ([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})").captures(line) {
-            out.push(Bss { bssid: c[1].to_lowercase(), freq: 0, signal: -100.0, ssid: String::new(), seen_ms: None });
+            out.push(Bss { bssid: c[1].to_lowercase(), freq: 0, signal: -100.0, ssid: String::new(), seen_ms: None, width: None });
             continue;
         }
         let Some(cur) = out.last_mut() else { continue };

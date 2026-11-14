@@ -1,9 +1,11 @@
 mod airtime;
+mod check;
 mod collector;
 mod control;
 mod debugfs;
 mod events;
 mod hostapd;
+mod ie;
 mod iwparse;
 mod model;
 mod nl80211;
@@ -35,6 +37,9 @@ USAGE: mt7996app [OPTIONS]
   --any-driver      include non-mt7996 wifi phys
   --iw PATH         path to the iw binary (default: iw)
   --debugfs PATH    debugfs ieee80211 root (default: /sys/kernel/debug/ieee80211)
+  --check           read-only self-test for the first run on hardware: verifies the MLO
+                    statistics, neighbour widths and hostapd_cli, prints the control
+                    commands without running them; exit status 1 if a check FAILs
   --once            sample twice, print a text summary and exit
   --json            with --once: print JSON instead
   --no-netlink      do not read per-link statistics from nl80211 (iw only)
@@ -70,6 +75,7 @@ struct Args {
     iw: String,
     debugfs: String,
     once: bool,
+    check: bool,
     json: bool,
     netlink: bool,
     kmsg: bool,
@@ -110,6 +116,7 @@ fn parse_args() -> Result<Args, String> {
         iw: "iw".into(),
         debugfs: debugfs::DEFAULT_ROOT.into(),
         once: false,
+        check: false,
         json: false,
         netlink: true,
         kmsg: true,
@@ -167,6 +174,7 @@ fn parse_args() -> Result<Args, String> {
             "--airtime-auto" => a.airtime_auto = true,
             "--steer-auto" => a.steer_auto = true,
             "--once" => a.once = true,
+            "--check" => a.check = true,
             "--json" => a.json = true,
             "-h" | "--help" => {
                 print!("{HELP}");
@@ -181,6 +189,9 @@ fn parse_args() -> Result<Args, String> {
     }
     if (a.airtime_auto || a.steer_auto || a.dry_run) && !a.allow_control {
         return Err("--airtime-auto, --steer-auto and --control-dry-run need --allow-control".into());
+    }
+    if a.check && (a.demo || a.once) {
+        return Err("--check inspects real hardware and cannot be combined with --demo or --once".into());
     }
     Ok(a)
 }
@@ -330,6 +341,16 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if a.check {
+        std::process::exit(check::run(&check::CheckCfg {
+            iw: a.iw.clone(),
+            debugfs: a.debugfs.clone(),
+            hostapd_cli: a.hostapd_cli.clone(),
+            hostapd_ctrl: a.hostapd_ctrl.clone(),
+            netlink: a.netlink,
+            any_driver: a.any_driver,
+        }));
+    }
     let hostapd = Some(HostapdCfg { cli: a.hostapd_cli.clone(), ctrl: a.hostapd_ctrl.clone() });
     let src: Box<dyn Source> = if a.demo {
         Box::new(DemoSource::new())
