@@ -143,6 +143,8 @@ impl Source for RealSource {
             raw.ifaces.retain(|i| phys.contains(&format!("phy{}", i.phy)));
         }
 
+        // the short-lived interface of a control scan is not part of the AP
+        raw.ifaces.retain(|i| i.name != crate::control::TEMP_SCAN_IFACE);
         let ifaces = raw.ifaces.clone();
         for i in &ifaces {
             if !matches!(i.kind.as_deref(), None | Some("AP") | Some("mesh point") | Some("P2P-GO")) {

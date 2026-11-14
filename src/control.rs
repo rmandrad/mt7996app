@@ -8,7 +8,7 @@ use crate::events::EventLog;
 use crate::planner::valid_puncturing;
 use crate::util::{is_ifname, is_mac};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -17,6 +17,8 @@ pub struct ControlCfg {
     pub dry_run: bool,
     pub token: String,
     pub iw: String,
+    /// iproute2, for bringing the temporary scan interface up
+    pub ip: String,
     pub hostapd_cli: String,
     pub hostapd_ctrl: Option<String>,
     pub airtime_auto: bool,
@@ -30,6 +32,7 @@ impl Default for ControlCfg {
             dry_run: false,
             token: String::new(),
             iw: "iw".into(),
+            ip: "ip".into(),
             hostapd_cli: "hostapd_cli".into(),
             hostapd_ctrl: None,
             airtime_auto: false,
@@ -131,9 +134,42 @@ impl Action {
     }
 }
 
+/// Name of the short-lived managed interface used to scan from an MLD AP.
+pub const TEMP_SCAN_IFACE: &str = "mt7996scan0";
+const DIRECT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+/// `iw dev X scan` blocks until all bands are done (2.4 + 5 + 6 GHz take 10-30 s).
+const TEMP_SCAN_TIMEOUT: Duration = Duration::from_secs(90);
+
 pub struct Control {
     pub cfg: ControlCfg,
     pub log: Arc<EventLog>,
+    /// held while a scan runs: two scans must not share (and delete) the temporary interface
+    scan_lock: Mutex<()>,
+}
+
+/// `phyN` of an interface from `iw dev IF info` ("wiphy N").
+pub fn parse_wiphy(info: &str) -> Option<String> {
+    info.lines().find_map(|l| l.trim().strip_prefix("wiphy ")).and_then(|n| n.trim().parse::<u32>().ok()).map(|n| format!("phy{n}"))
+}
+
+/// The kernel refuses `scan trigger` on an MLD AP with EOPNOTSUPP (-95).
+pub fn scan_unsupported(err: &str) -> bool {
+    err.contains("(-95)") || err.to_ascii_lowercase().contains("not supported")
+}
+
+/// The commands that scan through a temporary managed interface of `phy`
+/// (`add`, `up`, `scan`, `del`); the last one must always run.
+pub fn temp_scan_steps(cfg: &ControlCfg, phy: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+    if !phy.strip_prefix("phy").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())) {
+        return Err(format!("invalid phy name '{phy}'"));
+    }
+    let v = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    Ok(vec![
+        (cfg.iw.clone(), v(&["phy", phy, "interface", "add", TEMP_SCAN_IFACE, "type", "managed"])),
+        (cfg.ip.clone(), v(&["link", "set", TEMP_SCAN_IFACE, "up"])),
+        (cfg.iw.clone(), v(&["dev", TEMP_SCAN_IFACE, "scan"])),
+        (cfg.iw.clone(), v(&["dev", TEMP_SCAN_IFACE, "del"])),
+    ])
 }
 
 /// Compare without leaking the position of the first mismatch.
@@ -148,7 +184,103 @@ pub fn token_ok(expected: &str, given: &str) -> bool {
 
 impl Control {
     pub fn new(cfg: ControlCfg, log: Arc<EventLog>) -> Arc<Self> {
-        Arc::new(Self { cfg, log })
+        Arc::new(Self { cfg, log, scan_lock: Mutex::new(()) })
+    }
+
+    /// Run one command and leave an audit entry with the exact command line.
+    fn run_logged(&self, who: &str, prog: &str, args: &[String], timeout: Duration) -> Result<String, String> {
+        let line = format!("{prog} {}", args.join(" "));
+        match crate::util::run(prog, args, timeout) {
+            Ok(out) => {
+                self.log.push("info", "control", format!("{who}: {line} -> ok"));
+                Ok(out)
+            }
+            Err(e) => {
+                self.log.push("error", "control", format!("{who}: {line} -> {e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Remove a leftover temporary scan interface (a crash between `add` and `del`). Silent when there is none.
+    pub fn cleanup_temp_iface(&self) {
+        if self.cfg.enabled && !self.cfg.dry_run {
+            let del = ["dev", TEMP_SCAN_IFACE, "del"].map(String::from);
+            if crate::util::run(&self.cfg.iw, &del, Duration::from_secs(5)).is_ok() {
+                self.log.push("warn", "control", format!("removed a leftover temporary interface {TEMP_SCAN_IFACE}"));
+            }
+        }
+    }
+
+    fn phy_of(&self, iface: &str) -> Result<String, String> {
+        let a = ["dev", iface, "info"].map(String::from);
+        crate::util::run(&self.cfg.iw, &a, Duration::from_secs(5)).and_then(|t| parse_wiphy(&t).ok_or_else(|| format!("cannot find the phy of {iface}")))
+    }
+
+    /// `scan`: trigger on the interface; if the kernel refuses (MLD AP), scan from a temporary
+    /// managed interface of the same phy instead. The scan cache belongs to the phy, so the
+    /// results show up in `iw dev IF scan dump` like any other scan.
+    fn scan(&self, who: &str, a: &Action, iface: &str) -> Result<String, String> {
+        let (prog, args) = a.argv(&self.cfg)?;
+        let line = format!("{prog} {}", args.join(" "));
+        if self.cfg.dry_run {
+            let fallback = match self.phy_of(iface).and_then(|p| temp_scan_steps(&self.cfg, &p)) {
+                Ok(steps) => steps.iter().map(|(p, a)| format!("{p} {}", a.join(" "))).collect::<Vec<_>>().join("; "),
+                Err(_) => format!("{} phy <phy of {iface}> interface add {TEMP_SCAN_IFACE} type managed; ...", self.cfg.iw),
+            };
+            self.log.push("info", "control", format!("{who}: DRY-RUN {line}  (if the kernel refuses, e.g. on an MLD AP: {fallback})"));
+            return Ok(format!("dry-run: {line}  (fallback on MLD APs: {fallback})"));
+        }
+        let Ok(_guard) = self.scan_lock.try_lock() else {
+            return Err("a scan is already running".into());
+        };
+        match crate::util::run(&prog, &args, DIRECT_SCAN_TIMEOUT) {
+            Ok(out) => {
+                self.log.push("info", "control", format!("{who}: {line} -> ok"));
+                return Ok(out.trim().to_string());
+            }
+            Err(e) if scan_unsupported(&e) => {
+                self.log.push("info", "control", format!("{who}: {line} -> refused ({}); scanning from a temporary interface", e.rsplit(": ").next().unwrap_or(&e)));
+            }
+            Err(e) => {
+                self.log.push("error", "control", format!("{who}: {line} -> {e}"));
+                return Err(e);
+            }
+        }
+        self.scan_via_temp_iface(who, iface)
+    }
+
+    fn scan_via_temp_iface(&self, who: &str, iface: &str) -> Result<String, String> {
+        let steps = temp_scan_steps(&self.cfg, &self.phy_of(iface)?)?;
+        let (add, rest) = steps.split_first().ok_or("no steps")?;
+        let (del, middle) = rest.split_last().ok_or("no steps")?;
+        // a crashed earlier run may have left the interface behind
+        let _ = crate::util::run(&del.0, &del.1, Duration::from_secs(5));
+        self.run_logged(who, &add.0, &add.1, Duration::from_secs(10)).map_err(|e| {
+            format!("{e}\nthe driver refused a second interface next to the AP; scan with another tool or rely on hostapd ACS")
+        })?;
+        let mut result = Ok(String::new());
+        for (prog, args) in middle {
+            let t = if args.last().is_some_and(|l| l == "scan") { TEMP_SCAN_TIMEOUT } else { Duration::from_secs(10) };
+            match self.run_logged(who, prog, args, t) {
+                Ok(out) => result = Ok(out),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        // always remove the temporary interface, whatever happened
+        let cleanup = self.run_logged(who, &del.0, &del.1, Duration::from_secs(10));
+        match (result, cleanup) {
+            (Ok(out), Ok(_)) => {
+                let n = out.lines().filter(|l| l.starts_with("BSS ")).count();
+                Ok(format!("scan finished from the temporary interface {TEMP_SCAN_IFACE}: {n} BSS in the scan cache"))
+            }
+            (Ok(_), Err(e)) => Err(format!("scan finished, but the temporary interface {TEMP_SCAN_IFACE} was NOT removed ({e}); run `iw dev {TEMP_SCAN_IFACE} del`")),
+            (Err(e), Ok(_)) => Err(e),
+            (Err(e), Err(c)) => Err(format!("{e}\nand the temporary interface {TEMP_SCAN_IFACE} was NOT removed ({c}); run `iw dev {TEMP_SCAN_IFACE} del`")),
+        }
     }
 
     /// Run (or dry-run) an action; always leaves an audit entry.
@@ -156,22 +288,16 @@ impl Control {
         if !self.cfg.enabled {
             return Err("control is disabled (start with --allow-control)".into());
         }
+        if let Action::Scan { iface } = a {
+            return self.scan(who, a, iface);
+        }
         let (prog, args) = a.argv(&self.cfg)?;
         let line = format!("{prog} {}", args.join(" "));
         if self.cfg.dry_run {
             self.log.push("info", "control", format!("{who}: DRY-RUN {line}"));
             return Ok(format!("dry-run: {line}"));
         }
-        match crate::util::run(&prog, &args, Duration::from_secs(10)) {
-            Ok(out) => {
-                self.log.push("info", "control", format!("{who}: {line} -> ok"));
-                Ok(out.trim().to_string())
-            }
-            Err(e) => {
-                self.log.push("error", "control", format!("{who}: {line} -> {e}"));
-                Err(e)
-            }
-        }
+        self.run_logged(who, &prog, &args, Duration::from_secs(10)).map(|o| o.trim().to_string())
     }
 }
 
@@ -234,7 +360,8 @@ mod tests {
         let mut c = cfg();
         c.dry_run = true;
         let out = Control::new(c, log.clone()).execute("ui", &a).unwrap();
-        assert_eq!(out, "dry-run: iw dev wlan0 scan trigger");
+        assert!(out.starts_with("dry-run: iw dev wlan0 scan trigger"), "{out}");
+        assert!(out.contains("interface add"), "the fallback is shown: {out}");
         assert!(log.all().last().unwrap().msg.contains("DRY-RUN"));
     }
 
@@ -244,5 +371,106 @@ mod tests {
         assert!(!token_ok("secret", "secreT"));
         assert!(!token_ok("secret", "secre"));
         assert!(!token_ok("", ""));
+    }
+
+    #[test]
+    fn temp_scan_commands() {
+        let steps = temp_scan_steps(&cfg(), "phy0").unwrap();
+        let lines: Vec<String> = steps.iter().map(|(p, a)| format!("{p} {}", a.join(" "))).collect();
+        assert_eq!(
+            lines,
+            [
+                "iw phy phy0 interface add mt7996scan0 type managed",
+                "ip link set mt7996scan0 up",
+                "iw dev mt7996scan0 scan",
+                "iw dev mt7996scan0 del"
+            ]
+        );
+        for bad in ["phy", "phy0; reboot", "wlan0", "phyx", ""] {
+            assert!(temp_scan_steps(&cfg(), bad).is_err(), "{bad}");
+        }
+        assert!(crate::util::is_ifname(TEMP_SCAN_IFACE));
+    }
+
+    #[test]
+    fn wiphy_and_refusal_detection() {
+        assert_eq!(parse_wiphy("Interface wlan0\n\tifindex 17\n\twdev 0x2\n\twiphy 0\n\ttype AP\n").as_deref(), Some("phy0"));
+        assert_eq!(parse_wiphy("\twiphy 12\n").as_deref(), Some("phy12"));
+        assert_eq!(parse_wiphy("nothing\n"), None);
+        assert!(scan_unsupported("iw dev wlan0 scan trigger: command failed: Operation not supported (-95)"));
+        assert!(!scan_unsupported("iw dev wlan0 scan trigger: command failed: Device or resource busy (-16)"));
+    }
+
+    #[test]
+    fn a_second_scan_is_refused_while_one_runs() {
+        let c = Control::new(cfg(), EventLog::new());
+        let _held = c.scan_lock.lock().unwrap();
+        let r = c.execute("t", &Action::Scan { iface: "wlan0".into() });
+        assert_eq!(r.unwrap_err(), "a scan is already running");
+    }
+
+    /// Fake `iw` / `ip` that log every call: scenario 1 refuses `scan trigger` (MLD AP) and lets the
+    /// temporary-interface scan succeed, scenario 2 makes that scan fail; the interface must be
+    /// deleted in both, and scenario 3 has a driver that refuses the second interface.
+    #[test]
+    fn scan_falls_back_to_a_temporary_interface_and_always_removes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mt7996app-scan-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let script = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\necho \"{name} $*\" >> {}\n{body}\n", log.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let iw = script(
+            "iw",
+            r#"case "$*" in
+ "dev wlan0 scan trigger") echo "command failed: Operation not supported (-95)" >&2; exit 1;;
+ "dev wlan0 info") printf 'Interface wlan0\n\twiphy 0\n';;
+ "dev mt7996scan0 scan") if [ -e "$0.failscan" ]; then echo "command failed: Device or resource busy (-16)" >&2; exit 1; fi
+     printf 'BSS aa:bb:cc:dd:ee:01(on mt7996scan0)\n\tfreq: 5240\nBSS aa:bb:cc:dd:ee:02(on mt7996scan0)\n\tfreq: 2437\n';;
+ "phy phy0 interface add"*) if [ -e "$0.noadd" ]; then echo "command failed: Device or resource busy (-16)" >&2; exit 1; fi;;
+esac"#,
+        );
+        let ip = script("ip", "");
+        let c = Control::new(ControlCfg { enabled: true, iw: iw.clone(), ip, ..Default::default() }, EventLog::new());
+        let calls = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(|l| l.splitn(2, ' ').collect::<Vec<_>>().join(" ").replace(&format!("{}/", dir.display()), "")).collect::<Vec<_>>();
+        let go = || c.execute("t", &Action::Scan { iface: "wlan0".into() });
+
+        // 1: fallback works
+        let out = go().unwrap();
+        assert!(out.contains("2 BSS"), "{out}");
+        let seq: Vec<String> = calls();
+        assert_eq!(
+            seq,
+            [
+                "iw dev wlan0 scan trigger",
+                "iw dev wlan0 info",
+                "iw dev mt7996scan0 del", // leftover cleanup, result ignored
+                "iw phy phy0 interface add mt7996scan0 type managed",
+                "ip link set mt7996scan0 up",
+                "iw dev mt7996scan0 scan",
+                "iw dev mt7996scan0 del",
+            ]
+        );
+        assert!(c.log.all().iter().any(|e| e.msg.contains("scanning from a temporary interface")));
+
+        // 2: the scan itself fails, the interface is still deleted
+        std::fs::remove_file(&log).unwrap();
+        std::fs::write(format!("{iw}.failscan"), "").unwrap();
+        let e = go().unwrap_err();
+        assert!(e.contains("busy"), "{e}");
+        assert_eq!(calls().last().map(String::as_str), Some("iw dev mt7996scan0 del"));
+        std::fs::remove_file(format!("{iw}.failscan")).unwrap();
+
+        // 3: the driver refuses the interface: clear error, no scan attempted
+        std::fs::remove_file(&log).unwrap();
+        std::fs::write(format!("{iw}.noadd"), "").unwrap();
+        let e = go().unwrap_err();
+        assert!(e.contains("refused a second interface"), "{e}");
+        assert!(!calls().iter().any(|l| l.contains("mt7996scan0 scan")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

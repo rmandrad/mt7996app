@@ -430,7 +430,7 @@ Safety model:
 | Action | Runs |
 |---|---|
 | `set_airtime` | `iw dev IF station set MAC airtime_weight W` |
-| `scan` | `iw dev IF scan trigger` - **the AP leaves its channel briefly** |
+| `scan` | `iw dev IF scan trigger` - **the AP leaves its channel briefly**. On an MLD AP the kernel refuses this (`-95`); the daemon then runs `iw phy PHY interface add mt7996scan0 type managed`, `ip link set mt7996scan0 up`, `iw dev mt7996scan0 scan` (10-30 s) and always `iw dev mt7996scan0 del`. The scan cache belongs to the phy, so the planner sees the result. Only one scan runs at a time; a leftover `mt7996scan0` (crash) is removed at start-up |
 | `chan_switch` | `hostapd_cli [-p DIR] -i IF [-l LINK] chan_switch COUNT FREQ center_freq1=C bandwidth=B <modes> [punct_bitmap=0xN]` |
 | `btm` | `hostapd_cli -i IF bss_tm_req MAC neighbor=BSSID,0x0000,OPCLASS,CHANNEL,PHYTYPE pref=1 abridged=1 valid_int=100` |
 
@@ -464,11 +464,12 @@ it with `hostapd_cli help` before enabling control, and test on a lab AP first.
   spec, but have not met a real 6 GHz beacon yet. `--check` prints the decoded widths of the scan cache; compare them
   with `iw dev wlan0 scan dump`. A neighbour is treated as fully occupying its width, a rougher model than a real
   secondary-channel CCA.
-- **Scanning an MLD AP:** `iw dev wlan0 scan trigger` is refused on the MLD interface (`Operation not supported
-  (-95)`), so the dashboard's *Trigger scan* button cannot work there, and the kernel's scan cache stays empty. Scan
-  from a temporary second interface on the same phy; the cache belongs to the phy, so the daemon sees the result:
-  `iw phy phy0 interface add scan0 type managed; ip link set scan0 up; iw dev scan0 scan; iw dev scan0 del`
-  (the AP leaves its channels briefly while it scans).
+- **Scanning an MLD AP:** the kernel refuses `iw dev wlan0 scan trigger` on an MLD interface (`Operation not
+  supported (-95)`), and the AP never scans on its own, so the scan cache stays empty until something fills it. The
+  `scan` control action handles this: after that refusal it scans from a temporary managed interface of the same
+  phy (see the table below). This needs `ip` (iproute2), and the driver has to allow a second interface next to the
+  AP; if it refuses, the error says so. Verified by hand on a BPI-R4 with the commands of the table; the automatic
+  fallback itself is unit-tested with fake `iw` / `ip` and has not run on the router yet.
 - **`iw dev` MLD output is verified** on a BPI-R4 (`MLD with links:` / `- link ID N link addr ...`). A single-link
   client on an MLD AP may be reported without link information; it is then listed as "link unknown".
 - `tx_stats` covers all bands of the device. Entries are labelled with the driver's own `Phy ..., Phy band N`

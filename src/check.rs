@@ -411,6 +411,20 @@ pub fn run(cfg: &CheckCfg) -> i32 {
         }
     }
 
+    match output_any(&ccfg.ip, &["-V"]) {
+        Some(_) => r.ok("`ip` (iproute2) found: the scan fallback for MLD APs can bring its temporary interface up"),
+        None if facts.has_mld => r.warn("`ip` (iproute2) not found: scanning an MLD AP needs it for the temporary interface"),
+        None => r.info("`ip` (iproute2) not found (only needed to scan an MLD AP)"),
+    }
+    r.info(format!(
+        "scan on an MLD AP: the kernel refuses `scan trigger` there, so after that refusal the daemon runs\n\
+         {iw} phy <phy> interface add {t} type managed; {ip} link set {t} up; {iw} dev {t} scan; {iw} dev {t} del\n\
+         (the temporary interface is always removed again)",
+        iw = ccfg.iw,
+        ip = ccfg.ip,
+        t = crate::control::TEMP_SCAN_IFACE
+    ));
+
     // ---- summary
     r.section("Summary");
     r.info(format!("{} ok, {} warnings, {} failures", r.count(Level::Ok), r.count(Level::Warn), r.count(Level::Fail)));

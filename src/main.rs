@@ -375,6 +375,7 @@ fn main() {
             dry_run: a.dry_run,
             token,
             iw: a.iw.clone(),
+            ip: "ip".into(),
             hostapd_cli: a.hostapd_cli.clone(),
             hostapd_ctrl: a.hostapd_ctrl.clone(),
             airtime_auto: a.airtime_auto,
@@ -382,6 +383,7 @@ fn main() {
         },
         log.clone(),
     );
+    ctl.cleanup_temp_iface();
     if a.kmsg && !a.demo && !a.once {
         events::spawn_kmsg(log.clone());
     }
