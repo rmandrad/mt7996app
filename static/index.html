@@ -157,6 +157,13 @@ const fmt = (v, d = 1, u = "") => v == null ? "–" : (+v).toFixed(d).replace(/\
 const bandCls = b => b === "2.4G" ? "b24" : b === "5G" ? "b5" : "b6";
 const sigCls = s => s == null ? "" : s >= -60 ? "sig-good" : s >= -72 ? "sig-mid" : "sig-bad";
 const open = new Set();   // expanded station MACs
+// <details> inside panels that are rebuilt on every poll: remember which are open, by data-k, and re-open them
+const openDetails = new Set();
+document.addEventListener("toggle", ev => {
+  const d = ev.target;
+  if (d instanceof HTMLDetailsElement && d.dataset.k) d.open ? openDetails.add(d.dataset.k) : openDetails.delete(d.dataset.k);
+}, true);   // toggle does not bubble
+const detailsAttr = k => `data-k="${esc(k)}"${openDetails.has(k) ? " open" : ""}`;
 let hist = {};
 
 function rateStr(r) {
@@ -764,7 +771,7 @@ function neighborTable(nb) {
     <td class="num">${fmt(n.signal, 0)} dBm</td><td>${n.width ? n.width + " MHz" + (n.center1 ? " (centre " + n.center1 + ")" : "") : "<span class='muted'>unknown</span>"}</td>
     <td style="white-space:normal">${esc(n.ssid) || "<span class='muted'>hidden</span>"}${n.own ? " <span class='muted'>(this AP)</span>" : ""}</td>
     <td class="muted">${esc(n.bssid)}</td><td class="num">${n.age_s != null ? fmt(n.age_s, 0, " s") : "–"}</td></tr>`).join("");
-  return `<details><summary class="muted">neighbours (${nb.length})</summary><table><tr><th>MHz</th><th class="num">signal</th><th>width</th><th>SSID</th><th>BSSID</th><th class="num">age</th></tr>${rows}</table></details>`;
+  return `<details ${detailsAttr("neighbours")}><summary class="muted">neighbours (${nb.length})</summary><table><tr><th>MHz</th><th class="num">signal</th><th>width</th><th>SSID</th><th>BSSID</th><th class="num">age</th></tr>${rows}</table></details>`;
 }
 
 function renderPlan(st) {
@@ -795,7 +802,7 @@ function renderPlan(st) {
       h += `<p><b>Move to ch ${esc(c.channel)} (${c.freq} MHz)</b>: interference ${fmt(c.score, 2)} vs ${fmt(l.current_score, 2)} now — ${esc(c.reason)}
         ${btn("Apply channel", a, "Switches channel with hostapd chan_switch; clients may briefly disconnect.", "warn")}</p>`;
     } else h += `<p class="muted">Current channel is among the best for this width.</p>`;
-    if (l.candidates.length) h += `<details><summary class="muted">candidates</summary><table><tr><th>ch</th><th class="num">score</th><th>notes</th></tr>` +
+    if (l.candidates.length) h += `<details ${detailsAttr("candidates:" + l.iface + ":" + l.link)}><summary class="muted">candidates</summary><table><tr><th>ch</th><th class="num">score</th><th>notes</th></tr>` +
       l.candidates.map(c => `<tr><td>${esc(c.channel ?? c.freq)}${c.current ? " (now)" : ""}</td><td class="num">${fmt(c.score, 2)}</td><td>${esc(c.reason)}</td></tr>`).join("") + `</table></details>`;
     h += "</div>";
   }
